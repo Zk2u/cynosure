@@ -64,14 +64,14 @@ pub struct LocalCell<T> {
 }
 
 struct Inner<T> {
-    strong_count: Cell<usize>,
+    count: Cell<usize>,
     value: T,
 }
 
 impl<T> LocalCell<T> {
     pub fn new(value: T) -> Self {
         let inner = Box::new(Inner {
-            strong_count: Cell::new(1),
+            count: Cell::new(1),
             value,
         });
 
@@ -95,13 +95,30 @@ impl<T> LocalCell<T> {
     {
         unsafe { f(&mut (*self.ptr.as_ptr()).value) }
     }
+
+    /// Consumes the LocalCell, returning the inner value if it is the only
+    /// reference, or an error if there are other references.
+    pub fn into_inner(self) -> Result<T, Self> {
+        if unsafe { self.ptr.as_ref().count.get() } == 1 {
+            let ptr = self.ptr;
+            std::mem::forget(self); // Prevent Drop from running
+            Ok(unsafe { Box::from_raw(ptr.as_ptr()).value })
+        } else {
+            Err(self)
+        }
+    }
+
+    /// Returns the number of references to the inner value.
+    pub fn count(&self) -> usize {
+        unsafe { self.ptr.as_ref().count.get() }
+    }
 }
 
 impl<T> Clone for LocalCell<T> {
     fn clone(&self) -> Self {
         unsafe {
             let inner = self.ptr.as_ref();
-            inner.strong_count.set(inner.strong_count.get() + 1);
+            inner.count.set(inner.count.get() + 1);
         }
         Self { ptr: self.ptr }
     }
@@ -111,14 +128,25 @@ impl<T> Drop for LocalCell<T> {
     fn drop(&mut self) {
         unsafe {
             let inner = self.ptr.as_ref();
-            let count = inner.strong_count.get();
+            let count = inner.count.get();
             if count == 1 {
                 // Last reference, deallocate
                 drop(Box::from_raw(self.ptr.as_ptr()));
             } else {
-                inner.strong_count.set(count - 1);
+                inner.count.set(count - 1);
             }
         }
+    }
+}
+
+impl<T: std::fmt::Debug> std::fmt::Debug for LocalCell<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.with(|value| {
+            f.debug_struct("LocalCell")
+                .field("count", &self.count())
+                .field("value", value)
+                .finish()
+        })
     }
 }
 
@@ -381,5 +409,184 @@ mod tests {
         // These should compile, confirming LocalCell is neither Send nor Sync
         assert_not_send::<LocalCell<i32>>();
         assert_not_sync::<LocalCell<i32>>();
+    }
+
+    #[test]
+    fn test_count_single_reference() {
+        let cell = LocalCell::new(42);
+        assert_eq!(cell.count(), 1);
+    }
+
+    #[test]
+    fn test_count_multiple_references() {
+        let cell = LocalCell::new(42);
+        assert_eq!(cell.count(), 1);
+
+        let cell2 = cell.clone();
+        assert_eq!(cell.count(), 2);
+        assert_eq!(cell2.count(), 2);
+
+        let cell3 = cell.clone();
+        assert_eq!(cell.count(), 3);
+        assert_eq!(cell2.count(), 3);
+        assert_eq!(cell3.count(), 3);
+
+        drop(cell3);
+        assert_eq!(cell.count(), 2);
+        assert_eq!(cell2.count(), 2);
+
+        drop(cell2);
+        assert_eq!(cell.count(), 1);
+    }
+
+    #[test]
+    fn test_into_inner_single_reference() {
+        let cell = LocalCell::new(vec![1, 2, 3]);
+        assert_eq!(cell.count(), 1);
+
+        let inner = cell
+            .into_inner()
+            .expect("Should succeed with single reference");
+        assert_eq!(inner, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_into_inner_multiple_references() {
+        let cell = LocalCell::new(String::from("hello"));
+        let cell2 = cell.clone();
+
+        assert_eq!(cell.count(), 2);
+        assert_eq!(cell2.count(), 2);
+
+        // Should fail because there are multiple references
+        let result = cell.into_inner();
+        assert!(result.is_err());
+
+        // The cell should be returned in the error
+        let cell = result.unwrap_err();
+        assert_eq!(cell.count(), 2);
+
+        // Verify the data is still accessible
+        cell.with(|s| {
+            assert_eq!(s, "hello");
+        });
+
+        cell2.with(|s| {
+            assert_eq!(s, "hello");
+        });
+    }
+
+    #[test]
+    fn test_into_inner_after_clones_dropped() {
+        let cell = LocalCell::new(42);
+        let cell2 = cell.clone();
+        let cell3 = cell.clone();
+
+        assert_eq!(cell.count(), 3);
+
+        // Drop the clones
+        drop(cell2);
+        drop(cell3);
+
+        assert_eq!(cell.count(), 1);
+
+        // Now into_inner should succeed
+        let inner = cell
+            .into_inner()
+            .expect("Should succeed after all clones are dropped");
+        assert_eq!(inner, 42);
+    }
+
+    #[test]
+    fn test_into_inner_complex_type() {
+        use std::collections::HashMap;
+
+        let mut map = HashMap::new();
+        map.insert("key", vec![1, 2, 3]);
+
+        let cell = LocalCell::new(map);
+        let inner = cell
+            .into_inner()
+            .expect("Should succeed with complex type and single reference");
+
+        assert_eq!(inner.get("key").unwrap(), &vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_count_during_mutations() {
+        let cell = LocalCell::new(0);
+        let cell2 = cell.clone();
+
+        assert_eq!(cell.count(), 2);
+
+        // Count should remain consistent during mutations
+        cell.with_mut(|value| {
+            *value = 10;
+            // Check count inside closure
+            assert_eq!(cell2.count(), 2);
+        });
+
+        assert_eq!(cell.count(), 2);
+        assert_eq!(cell2.count(), 2);
+    }
+
+    #[test]
+    fn test_debug_implementation() {
+        let cell = LocalCell::new(42);
+        let debug_output = format!("{:?}", cell);
+
+        // Should contain the struct name, count, and value
+        assert!(debug_output.contains("LocalCell"));
+        assert!(debug_output.contains("count: 1"));
+        assert!(debug_output.contains("value: 42"));
+    }
+
+    #[test]
+    fn test_debug_with_multiple_references() {
+        let cell = LocalCell::new(String::from("hello"));
+        let cell2 = cell.clone();
+
+        let debug_output = format!("{:?}", cell);
+
+        // Should show count of 2 and the string value
+        assert!(debug_output.contains("LocalCell"));
+        assert!(debug_output.contains("count: 2"));
+        assert!(debug_output.contains("hello"));
+
+        // Both references should show the same debug info
+        let debug_output2 = format!("{:?}", cell2);
+        assert_eq!(debug_output, debug_output2);
+    }
+
+    #[test]
+    fn test_debug_with_complex_type() {
+        use std::collections::HashMap;
+
+        let mut map = HashMap::new();
+        map.insert("key", vec![1, 2, 3]);
+
+        let cell = LocalCell::new(map);
+        let debug_output = format!("{:?}", cell);
+
+        // Should contain the struct info and nested data
+        assert!(debug_output.contains("LocalCell"));
+        assert!(debug_output.contains("count: 1"));
+        assert!(debug_output.contains("key"));
+    }
+
+    #[test]
+    fn test_debug_output_format() {
+        let cell = LocalCell::new(vec![1, 2, 3]);
+        let cell2 = cell.clone();
+
+        println!("Single reference: {:?}", LocalCell::new(42));
+        println!("Multiple references: {:?}", cell);
+        println!(
+            "Complex type: {:?}",
+            LocalCell::new(std::collections::HashMap::from([("key", "value")]))
+        );
+
+        // Just verify it doesn't panic
+        assert!(format!("{:?}", cell2).len() > 0);
     }
 }
