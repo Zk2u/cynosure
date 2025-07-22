@@ -1,5 +1,6 @@
 [package]
 name = "localcell"
+description = "Compile-time checked mutable shared memory container for single-threaded async runtimes"
 version = "1.0.0"
 edition = "2024"
 license = "MIT"
