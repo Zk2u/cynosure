@@ -2,6 +2,9 @@
 name = "localcell"
 version = "1.0.0"
 edition = "2024"
+license = "MIT"
+authors = ["zk2u <zk2u@pm.me>"]
+repository = "https://github.com/zk2u/localcell"
 
 [dependencies]
 
