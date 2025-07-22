@@ -1,0 +1,10 @@
+[package]
+name = "localcell"
+version = "1.0.0"
+edition = "2024"
+
+[dependencies]
+
+[dev-dependencies]
+futures = "0.3.31"
+monoio = "0.2.4"
