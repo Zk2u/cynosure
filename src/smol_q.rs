@@ -1,0 +1,949 @@
+use std::{collections::VecDeque, mem::MaybeUninit};
+
+/// A VecDeque that stores up to N items inline before spilling to heap
+///
+/// # Examples
+///
+/// ```
+/// use localcell::smol_q::SmolQueue;
+///
+/// let mut queue: SmolQueue<i32, 4> = SmolQueue::new();
+/// queue.push_back(1);
+/// queue.push_back(2);
+/// queue.push_back(3);
+///
+/// // Iterate over references (non-consuming)
+/// for value in &queue {
+///     println!("Value: {}", value);
+/// }
+///
+/// // Queue is still usable
+/// assert_eq!(queue.pop_front(), Some(1));
+///
+/// // Consume the queue with into_iter
+/// let remaining: Vec<i32> = queue.into_iter().collect();
+/// assert_eq!(remaining, vec![2, 3]);
+/// ```
+pub enum SmolQueue<T, const N: usize> {
+    Inline {
+        buf: [MaybeUninit<T>; N],
+        head: usize,
+        tail: usize,
+        len: usize,
+    },
+    Heap(VecDeque<T>),
+}
+
+impl<T, const N: usize> Default for SmolQueue<T, N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T, const N: usize> SmolQueue<T, N> {
+    /// Creates a new empty SmolQueue
+    #[inline]
+    pub fn new() -> Self {
+        Self::Inline {
+            buf: [const { MaybeUninit::uninit() }; N],
+            head: 0,
+            tail: 0,
+            len: 0,
+        }
+    }
+
+    /// Adds an element to the back of the queue
+    #[inline]
+    pub fn push_back(&mut self, value: T) {
+        match self {
+            Self::Inline {
+                buf,
+                head,
+                tail,
+                len,
+            } => {
+                if *len < N {
+                    buf[*tail] = MaybeUninit::new(value);
+                    *tail = if *tail + 1 == N { 0 } else { *tail + 1 };
+                    *len += 1;
+                } else {
+                    // Spill to heap - move elements in order from circular buffer
+                    let mut heap = VecDeque::with_capacity((N * 2).max(8));
+
+                    let mut idx = *head;
+                    for _ in 0..*len {
+                        let val = unsafe { buf[idx].assume_init_read() };
+                        heap.push_back(val);
+                        idx = if idx + 1 == N { 0 } else { idx + 1 };
+                    }
+                    heap.push_back(value);
+                    *len = 0; // Prevent double-drop when Self::Inline is dropped
+                    *self = Self::Heap(heap);
+                }
+            }
+            Self::Heap(vec) => vec.push_back(value),
+        }
+    }
+
+    /// Removes and returns the element at the front of the queue
+    #[inline]
+    pub fn pop_front(&mut self) -> Option<T> {
+        match self {
+            Self::Inline { buf, head, len, .. } => {
+                if *len == 0 {
+                    None
+                } else {
+                    let value = unsafe { buf[*head].assume_init_read() };
+                    *head = if *head + 1 == N { 0 } else { *head + 1 };
+                    *len -= 1;
+                    Some(value)
+                }
+            }
+            Self::Heap(vec) => vec.pop_front(),
+        }
+    }
+
+    /// Removes and returns all elements from the queue as a Vec
+    pub fn take_all(&mut self) -> Vec<T> {
+        match self {
+            Self::Inline {
+                buf,
+                head,
+                tail,
+                len,
+            } => {
+                let mut result = Vec::with_capacity(*len);
+                let mut idx = *head;
+                for _ in 0..*len {
+                    let val = unsafe { buf[idx].assume_init_read() };
+                    result.push(val);
+                    idx = if idx + 1 == N { 0 } else { idx + 1 };
+                }
+                *head = 0;
+                *tail = 0;
+                *len = 0;
+                result
+            }
+            Self::Heap(vec) => vec.drain(..).collect(),
+        }
+    }
+
+    /// Creates an iterator that yields references to elements in FIFO order
+    /// Creates an iterator that yields references to elements in FIFO order
+    #[inline]
+    pub fn iter(&self) -> Iter<'_, T, N> {
+        match self {
+            Self::Inline { buf, head, len, .. } => Iter::Inline {
+                buf,
+                head: *head,
+                remaining: *len,
+                _phantom: std::marker::PhantomData,
+            },
+            Self::Heap(vec) => Iter::Heap(vec.iter()),
+        }
+    }
+}
+
+impl<T: std::fmt::Debug, const N: usize> std::fmt::Debug for SmolQueue<T, N> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
+    }
+}
+
+impl<T: Clone, const N: usize> Clone for SmolQueue<T, N> {
+    fn clone(&self) -> Self {
+        let mut new_queue = Self::new();
+        for item in self.iter() {
+            new_queue.push_back(item.clone());
+        }
+        new_queue
+    }
+}
+
+impl<T: PartialEq, const N: usize> PartialEq for SmolQueue<T, N> {
+    fn eq(&self, other: &Self) -> bool {
+        if self.len() != other.len() {
+            return false;
+        }
+        self.iter().zip(other.iter()).all(|(a, b)| a == b)
+    }
+}
+
+impl<T: Eq, const N: usize> Eq for SmolQueue<T, N> {}
+
+impl<T, const N: usize> From<Vec<T>> for SmolQueue<T, N> {
+    fn from(vec: Vec<T>) -> Self {
+        let mut queue = Self::new();
+        for item in vec {
+            queue.push_back(item);
+        }
+        queue
+    }
+}
+
+impl<T, const N: usize> From<VecDeque<T>> for SmolQueue<T, N> {
+    fn from(vec_deque: VecDeque<T>) -> Self {
+        let mut queue = Self::new();
+        for item in vec_deque {
+            queue.push_back(item);
+        }
+        queue
+    }
+}
+
+impl<T, const N: usize> Extend<T> for SmolQueue<T, N> {
+    fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
+        for item in iter {
+            self.push_back(item);
+        }
+    }
+}
+
+impl<T, const N: usize> FromIterator<T> for SmolQueue<T, N> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        let mut queue = Self::new();
+        queue.extend(iter);
+        queue
+    }
+}
+
+impl<T, const N: usize> SmolQueue<T, N> {
+    /// Returns the number of elements in the queue
+    #[inline]
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Inline { len, .. } => *len,
+            Self::Heap(vec) => vec.len(),
+        }
+    }
+
+    /// Returns true if the queue is empty
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+impl<T, const N: usize> Drop for SmolQueue<T, N> {
+    fn drop(&mut self) {
+        if let Self::Inline { buf, head, len, .. } = self {
+            let mut idx = *head;
+            for _ in 0..*len {
+                unsafe {
+                    buf[idx].assume_init_drop();
+                }
+                idx = if idx + 1 == N { 0 } else { idx + 1 };
+            }
+        }
+    }
+}
+
+/// Iterator that yields references to elements in the queue
+pub enum Iter<'a, T, const N: usize> {
+    Inline {
+        buf: &'a [std::mem::MaybeUninit<T>; N],
+        head: usize,
+        remaining: usize,
+        _phantom: std::marker::PhantomData<&'a T>,
+    },
+    Heap(std::collections::vec_deque::Iter<'a, T>),
+}
+
+impl<'a, T, const N: usize> Iterator for Iter<'a, T, N> {
+    type Item = &'a T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Inline {
+                buf,
+                head,
+                remaining,
+                ..
+            } => {
+                if *remaining == 0 {
+                    None
+                } else {
+                    let item = unsafe { buf[*head].assume_init_ref() };
+                    *head = if *head + 1 == N { 0 } else { *head + 1 };
+                    *remaining -= 1;
+                    Some(item)
+                }
+            }
+            Self::Heap(iter) => iter.next(),
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            Self::Inline { remaining, .. } => (*remaining, Some(*remaining)),
+            Self::Heap(iter) => iter.size_hint(),
+        }
+    }
+}
+
+impl<'a, T, const N: usize> ExactSizeIterator for Iter<'a, T, N> {
+    fn len(&self) -> usize {
+        match self {
+            Self::Inline { remaining, .. } => *remaining,
+            Self::Heap(iter) => iter.len(),
+        }
+    }
+}
+
+/// Owning iterator that yields elements from the queue
+pub struct IntoIter<T> {
+    inner: std::vec::IntoIter<T>,
+}
+
+impl<T> Iterator for IntoIter<T> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next()
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
+impl<T> ExactSizeIterator for IntoIter<T> {
+    fn len(&self) -> usize {
+        self.inner.len()
+    }
+}
+
+impl<T, const N: usize> IntoIterator for SmolQueue<T, N> {
+    type Item = T;
+    type IntoIter = IntoIter<T>;
+
+    fn into_iter(mut self) -> Self::IntoIter {
+        let vec = self.take_all();
+        IntoIter {
+            inner: vec.into_iter(),
+        }
+    }
+}
+
+impl<'a, T, const N: usize> IntoIterator for &'a SmolQueue<T, N> {
+    type Item = &'a T;
+    type IntoIter = Iter<'a, T, N>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_new_queue_is_empty() {
+        let mut queue: SmolQueue<i32, 4> = SmolQueue::new();
+        assert_eq!(queue.pop_front(), None);
+        assert_eq!(queue.take_all(), Vec::<i32>::new());
+    }
+
+    #[test]
+    fn test_single_element() {
+        let mut queue: SmolQueue<i32, 4> = SmolQueue::new();
+        queue.push_back(42);
+        assert_eq!(queue.pop_front(), Some(42));
+        assert_eq!(queue.pop_front(), None);
+    }
+
+    #[test]
+    fn test_fifo_order() {
+        let mut queue: SmolQueue<i32, 4> = SmolQueue::new();
+        queue.push_back(1);
+        queue.push_back(2);
+        queue.push_back(3);
+
+        assert_eq!(queue.pop_front(), Some(1));
+        assert_eq!(queue.pop_front(), Some(2));
+        assert_eq!(queue.pop_front(), Some(3));
+        assert_eq!(queue.pop_front(), None);
+    }
+
+    #[test]
+    fn test_fill_to_capacity() {
+        let mut queue: SmolQueue<i32, 3> = SmolQueue::new();
+        queue.push_back(1);
+        queue.push_back(2);
+        queue.push_back(3);
+
+        // Should still be inline
+        if let SmolQueue::Inline { len, .. } = &queue {
+            assert_eq!(*len, 3);
+        } else {
+            panic!("Queue should still be inline");
+        }
+
+        assert_eq!(queue.pop_front(), Some(1));
+        assert_eq!(queue.pop_front(), Some(2));
+        assert_eq!(queue.pop_front(), Some(3));
+    }
+
+    #[test]
+    fn test_spill_to_heap() {
+        let mut queue: SmolQueue<i32, 2> = SmolQueue::new();
+        queue.push_back(1);
+        queue.push_back(2);
+
+        // Should be inline
+        assert!(matches!(queue, SmolQueue::Inline { .. }));
+
+        // This should spill to heap
+        queue.push_back(3);
+
+        // Should now be heap
+        assert!(matches!(queue, SmolQueue::Heap(_)));
+
+        assert_eq!(queue.pop_front(), Some(1));
+        assert_eq!(queue.pop_front(), Some(2));
+        assert_eq!(queue.pop_front(), Some(3));
+        assert_eq!(queue.pop_front(), None);
+    }
+
+    #[test]
+    fn test_operations_after_spill() {
+        let mut queue: SmolQueue<i32, 2> = SmolQueue::new();
+
+        // Fill and spill
+        queue.push_back(1);
+        queue.push_back(2);
+        queue.push_back(3); // Spills here
+
+        // Continue operations
+        queue.push_back(4);
+        queue.push_back(5);
+
+        assert_eq!(queue.pop_front(), Some(1));
+        assert_eq!(queue.pop_front(), Some(2));
+
+        queue.push_back(6);
+
+        assert_eq!(queue.pop_front(), Some(3));
+        assert_eq!(queue.pop_front(), Some(4));
+        assert_eq!(queue.pop_front(), Some(5));
+        assert_eq!(queue.pop_front(), Some(6));
+        assert_eq!(queue.pop_front(), None);
+    }
+
+    #[test]
+    fn test_circular_buffer_wraparound() {
+        let mut queue: SmolQueue<i32, 3> = SmolQueue::new();
+
+        // Fill the buffer
+        queue.push_back(1);
+        queue.push_back(2);
+        queue.push_back(3);
+
+        // Pop some elements
+        assert_eq!(queue.pop_front(), Some(1));
+        assert_eq!(queue.pop_front(), Some(2));
+
+        // Add more (should wrap around)
+        queue.push_back(4);
+        queue.push_back(5);
+
+        // Check order is preserved
+        assert_eq!(queue.pop_front(), Some(3));
+        assert_eq!(queue.pop_front(), Some(4));
+        assert_eq!(queue.pop_front(), Some(5));
+        assert_eq!(queue.pop_front(), None);
+    }
+
+    #[test]
+    fn test_take_all_inline() {
+        let mut queue: SmolQueue<i32, 4> = SmolQueue::new();
+        queue.push_back(1);
+        queue.push_back(2);
+        queue.push_back(3);
+
+        let all = queue.take_all();
+        assert_eq!(all, vec![1, 2, 3]);
+        assert_eq!(queue.pop_front(), None);
+        assert_eq!(queue.take_all(), Vec::<i32>::new());
+    }
+
+    #[test]
+    fn test_take_all_heap() {
+        let mut queue: SmolQueue<i32, 2> = SmolQueue::new();
+        queue.push_back(1);
+        queue.push_back(2);
+        queue.push_back(3); // Spills to heap
+        queue.push_back(4);
+
+        let all = queue.take_all();
+        assert_eq!(all, vec![1, 2, 3, 4]);
+        assert_eq!(queue.pop_front(), None);
+    }
+
+    #[test]
+    fn test_take_all_with_wraparound() {
+        let mut queue: SmolQueue<i32, 4> = SmolQueue::new();
+
+        // Fill buffer
+        queue.push_back(1);
+        queue.push_back(2);
+        queue.push_back(3);
+        queue.push_back(4);
+
+        // Pop some to create wraparound
+        assert_eq!(queue.pop_front(), Some(1));
+        assert_eq!(queue.pop_front(), Some(2));
+
+        // Add more
+        queue.push_back(5);
+        queue.push_back(6);
+
+        let all = queue.take_all();
+        assert_eq!(all, vec![3, 4, 5, 6]);
+        assert_eq!(queue.pop_front(), None);
+    }
+
+    #[test]
+    fn test_empty_operations() {
+        let mut queue: SmolQueue<i32, 4> = SmolQueue::new();
+
+        assert_eq!(queue.pop_front(), None);
+        assert_eq!(queue.take_all(), Vec::<i32>::new());
+
+        // After operations, should still work
+        queue.push_back(1);
+        assert_eq!(queue.pop_front(), Some(1));
+    }
+
+    #[test]
+    fn test_mixed_operations_sequence() {
+        let mut queue: SmolQueue<i32, 3> = SmolQueue::new();
+
+        queue.push_back(1);
+        assert_eq!(queue.pop_front(), Some(1));
+
+        queue.push_back(2);
+        queue.push_back(3);
+        assert_eq!(queue.pop_front(), Some(2));
+
+        queue.push_back(4);
+        queue.push_back(5);
+
+        assert_eq!(queue.pop_front(), Some(3));
+        assert_eq!(queue.pop_front(), Some(4));
+
+        queue.push_back(6);
+        assert_eq!(queue.pop_front(), Some(5));
+        assert_eq!(queue.pop_front(), Some(6));
+        assert_eq!(queue.pop_front(), None);
+    }
+
+    #[test]
+    fn test_capacity_one() {
+        let mut queue: SmolQueue<i32, 1> = SmolQueue::new();
+
+        queue.push_back(1);
+        assert_eq!(queue.pop_front(), Some(1));
+
+        queue.push_back(2);
+        queue.push_back(3); // Should spill to heap
+
+        assert!(matches!(queue, SmolQueue::Heap(_)));
+        assert_eq!(queue.pop_front(), Some(2));
+        assert_eq!(queue.pop_front(), Some(3));
+    }
+
+    #[test]
+    fn test_large_sequence() {
+        let mut queue: SmolQueue<i32, 4> = SmolQueue::new();
+
+        // Add many elements to test heap behavior
+        for i in 0..100 {
+            queue.push_back(i);
+        }
+
+        // Remove half
+        for i in 0..50 {
+            assert_eq!(queue.pop_front(), Some(i));
+        }
+
+        // Add more
+        for i in 100..150 {
+            queue.push_back(i);
+        }
+
+        // Take all remaining
+        let remaining = queue.take_all();
+        let expected: Vec<i32> = (50..100).chain(100..150).collect();
+        assert_eq!(remaining, expected);
+    }
+
+    #[test]
+    fn test_string_elements() {
+        let mut queue: SmolQueue<String, 2> = SmolQueue::new();
+
+        queue.push_back("hello".to_string());
+        queue.push_back("world".to_string());
+
+        assert_eq!(queue.pop_front(), Some("hello".to_string()));
+
+        queue.push_back("!".to_string()); // Should spill to heap
+
+        assert_eq!(queue.pop_front(), Some("world".to_string()));
+        assert_eq!(queue.pop_front(), Some("!".to_string()));
+    }
+
+    #[test]
+    fn test_clone_elements() {
+        #[derive(Clone, PartialEq, Debug)]
+        struct TestStruct(i32);
+
+        let mut queue: SmolQueue<TestStruct, 2> = SmolQueue::new();
+
+        queue.push_back(TestStruct(1));
+        queue.push_back(TestStruct(2));
+        queue.push_back(TestStruct(3)); // Spill to heap
+
+        assert_eq!(queue.pop_front(), Some(TestStruct(1)));
+        assert_eq!(queue.pop_front(), Some(TestStruct(2)));
+        assert_eq!(queue.pop_front(), Some(TestStruct(3)));
+    }
+
+    #[test]
+    fn test_zero_capacity_compiles() {
+        // This should compile but immediately spill to heap
+        let mut queue: SmolQueue<i32, 0> = SmolQueue::new();
+        queue.push_back(1);
+        assert!(matches!(queue, SmolQueue::Heap(_)));
+        assert_eq!(queue.pop_front(), Some(1));
+    }
+
+    #[test]
+    fn test_alternating_push_pop() {
+        let mut queue: SmolQueue<i32, 3> = SmolQueue::new();
+
+        for i in 0..10 {
+            queue.push_back(i);
+            assert_eq!(queue.pop_front(), Some(i));
+        }
+
+        assert_eq!(queue.pop_front(), None);
+    }
+
+    #[test]
+    fn test_take_all_after_wraparound_edge_case() {
+        let mut queue: SmolQueue<i32, 3> = SmolQueue::new();
+
+        // Create a specific wraparound scenario
+        queue.push_back(1);
+        queue.push_back(2);
+        queue.push_back(3);
+
+        // Pop all but one
+        assert_eq!(queue.pop_front(), Some(1));
+        assert_eq!(queue.pop_front(), Some(2));
+
+        // Add to wrap around
+        queue.push_back(4);
+        queue.push_back(5);
+
+        // Now we have: [4, 5, 3] with head pointing to index 2 (element 3)
+        let all = queue.take_all();
+        assert_eq!(all, vec![3, 4, 5]);
+    }
+
+    #[test]
+    fn test_reuse_after_take_all() {
+        let mut queue: SmolQueue<i32, 3> = SmolQueue::new();
+
+        queue.push_back(1);
+        queue.push_back(2);
+        let _ = queue.take_all();
+
+        // Should be reset and reusable
+        queue.push_back(3);
+        queue.push_back(4);
+        assert_eq!(queue.pop_front(), Some(3));
+        assert_eq!(queue.pop_front(), Some(4));
+    }
+
+    #[test]
+    fn test_iter_inline() {
+        let mut queue: SmolQueue<i32, 4> = SmolQueue::new();
+        queue.push_back(1);
+        queue.push_back(2);
+        queue.push_back(3);
+
+        let items: Vec<&i32> = queue.iter().collect();
+        assert_eq!(items, vec![&1, &2, &3]);
+
+        // Original queue should be unchanged
+        assert_eq!(queue.pop_front(), Some(1));
+    }
+
+    #[test]
+    fn test_iter_heap() {
+        let mut queue: SmolQueue<i32, 2> = SmolQueue::new();
+        queue.push_back(1);
+        queue.push_back(2);
+        queue.push_back(3); // Spills to heap
+
+        let items: Vec<&i32> = queue.iter().collect();
+        assert_eq!(items, vec![&1, &2, &3]);
+
+        // Original queue should be unchanged
+        assert_eq!(queue.pop_front(), Some(1));
+    }
+
+    #[test]
+    fn test_iter_with_wraparound() {
+        let mut queue: SmolQueue<i32, 4> = SmolQueue::new();
+
+        // Fill buffer
+        queue.push_back(1);
+        queue.push_back(2);
+        queue.push_back(3);
+        queue.push_back(4);
+
+        // Pop some to create wraparound
+        assert_eq!(queue.pop_front(), Some(1));
+        assert_eq!(queue.pop_front(), Some(2));
+
+        // Add more
+        queue.push_back(5);
+        queue.push_back(6);
+
+        let items: Vec<&i32> = queue.iter().collect();
+        assert_eq!(items, vec![&3, &4, &5, &6]);
+    }
+
+    #[test]
+    fn test_iter_empty() {
+        let queue: SmolQueue<i32, 4> = SmolQueue::new();
+        let items: Vec<&i32> = queue.iter().collect();
+        assert_eq!(items, Vec::<&i32>::new());
+    }
+
+    #[test]
+    fn test_into_iter_inline() {
+        let mut queue: SmolQueue<i32, 4> = SmolQueue::new();
+        queue.push_back(1);
+        queue.push_back(2);
+        queue.push_back(3);
+
+        let items: Vec<i32> = queue.into_iter().collect();
+        assert_eq!(items, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_into_iter_heap() {
+        let mut queue: SmolQueue<i32, 2> = SmolQueue::new();
+        queue.push_back(1);
+        queue.push_back(2);
+        queue.push_back(3); // Spills to heap
+
+        let items: Vec<i32> = queue.into_iter().collect();
+        assert_eq!(items, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_iter_size_hint() {
+        let mut queue: SmolQueue<i32, 3> = SmolQueue::new();
+        queue.push_back(1);
+        queue.push_back(2);
+
+        let mut iter = queue.iter();
+        assert_eq!(iter.size_hint(), (2, Some(2)));
+        assert_eq!(iter.len(), 2);
+
+        iter.next();
+        assert_eq!(iter.size_hint(), (1, Some(1)));
+        assert_eq!(iter.len(), 1);
+
+        iter.next();
+        assert_eq!(iter.size_hint(), (0, Some(0)));
+        assert_eq!(iter.len(), 0);
+    }
+
+    #[test]
+    fn test_into_iter_size_hint() {
+        let mut queue: SmolQueue<i32, 3> = SmolQueue::new();
+        queue.push_back(1);
+        queue.push_back(2);
+
+        let mut iter = queue.into_iter();
+        assert_eq!(iter.size_hint(), (2, Some(2)));
+        assert_eq!(iter.len(), 2);
+
+        iter.next();
+        assert_eq!(iter.size_hint(), (1, Some(1)));
+        assert_eq!(iter.len(), 1);
+    }
+
+    #[test]
+    fn test_iter_for_loop() {
+        let mut queue: SmolQueue<i32, 3> = SmolQueue::new();
+        queue.push_back(1);
+        queue.push_back(2);
+        queue.push_back(3);
+
+        let mut sum = 0;
+        for &value in &queue {
+            sum += value;
+        }
+        assert_eq!(sum, 6);
+
+        // Queue should be unchanged
+        assert_eq!(queue.iter().count(), 3);
+    }
+
+    #[test]
+    fn test_into_iter_for_loop() {
+        let mut queue: SmolQueue<i32, 3> = SmolQueue::new();
+        queue.push_back(1);
+        queue.push_back(2);
+        queue.push_back(3);
+
+        let mut sum = 0;
+        for value in queue {
+            sum += value;
+        }
+        assert_eq!(sum, 6);
+    }
+
+    #[test]
+    fn test_debug() {
+        let mut queue: SmolQueue<i32, 3> = SmolQueue::new();
+        queue.push_back(1);
+        queue.push_back(2);
+        queue.push_back(3);
+
+        let debug_str = format!("{:?}", queue);
+        assert_eq!(debug_str, "[1, 2, 3]");
+    }
+
+    #[test]
+    fn test_clone() {
+        let mut queue: SmolQueue<i32, 3> = SmolQueue::new();
+        queue.push_back(1);
+        queue.push_back(2);
+
+        let cloned = queue.clone();
+        assert_eq!(queue, cloned);
+
+        // Verify they're independent
+        queue.push_back(3);
+        assert_ne!(queue, cloned);
+    }
+
+    #[test]
+    fn test_partial_eq() {
+        let mut queue1: SmolQueue<i32, 3> = SmolQueue::new();
+        let mut queue2: SmolQueue<i32, 3> = SmolQueue::new();
+
+        queue1.push_back(1);
+        queue1.push_back(2);
+        queue2.push_back(1);
+        queue2.push_back(2);
+
+        assert_eq!(queue1, queue2);
+
+        queue2.push_back(3);
+        assert_ne!(queue1, queue2);
+    }
+
+    #[test]
+    fn test_default() {
+        let queue: SmolQueue<i32, 3> = SmolQueue::default();
+        assert!(queue.is_empty());
+        assert_eq!(queue.len(), 0);
+    }
+
+    #[test]
+    fn test_from_vec() {
+        let vec = vec![1, 2, 3, 4];
+        let queue: SmolQueue<i32, 2> = SmolQueue::from(vec);
+
+        let items: Vec<i32> = queue.into_iter().collect();
+        assert_eq!(items, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_from_vec_deque() {
+        let mut vec_deque = VecDeque::new();
+        vec_deque.push_back(1);
+        vec_deque.push_back(2);
+        vec_deque.push_back(3);
+
+        let queue: SmolQueue<i32, 2> = SmolQueue::from(vec_deque);
+        let items: Vec<i32> = queue.into_iter().collect();
+        assert_eq!(items, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_extend() {
+        let mut queue: SmolQueue<i32, 2> = SmolQueue::new();
+        queue.push_back(1);
+
+        queue.extend(vec![2, 3, 4]);
+        let items: Vec<i32> = queue.into_iter().collect();
+        assert_eq!(items, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_from_iterator() {
+        let queue: SmolQueue<i32, 2> = (1..=4).collect();
+        let items: Vec<i32> = queue.into_iter().collect();
+        assert_eq!(items, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_len_and_is_empty() {
+        let mut queue: SmolQueue<i32, 3> = SmolQueue::new();
+        assert_eq!(queue.len(), 0);
+        assert!(queue.is_empty());
+
+        queue.push_back(1);
+        assert_eq!(queue.len(), 1);
+        assert!(!queue.is_empty());
+
+        queue.push_back(2);
+        queue.push_back(3);
+        assert_eq!(queue.len(), 3);
+
+        queue.pop_front();
+        assert_eq!(queue.len(), 2);
+        assert!(!queue.is_empty());
+    }
+
+    #[test]
+    fn test_len_and_is_empty_after_spill() {
+        let mut queue: SmolQueue<i32, 2> = SmolQueue::new();
+        queue.push_back(1);
+        queue.push_back(2);
+        queue.push_back(3); // Spills to heap
+
+        assert_eq!(queue.len(), 3);
+        assert!(!queue.is_empty());
+
+        queue.pop_front();
+        assert_eq!(queue.len(), 2);
+    }
+
+    #[test]
+    fn test_eq_with_different_storage() {
+        let mut inline_queue: SmolQueue<i32, 4> = SmolQueue::new();
+        inline_queue.push_back(1);
+        inline_queue.push_back(2);
+
+        let mut heap_queue: SmolQueue<i32, 1> = SmolQueue::new();
+        heap_queue.push_back(1);
+        heap_queue.push_back(2); // Spills to heap, contains [1, 2]
+
+        // Compare their contents since they have different N values
+        let inline_contents: Vec<_> = inline_queue.iter().collect();
+        let heap_contents: Vec<_> = heap_queue.iter().collect();
+        assert_eq!(inline_contents, heap_contents);
+    }
+}

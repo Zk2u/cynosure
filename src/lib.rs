@@ -46,12 +46,33 @@
 //! - When you need weak references
 //! - When you want runtime borrow checking safety
 //!
-//! # Safety
+//! # Safety and Aliasing Restrictions
 //!
 //! `LocalCell` uses `unsafe` internally but provides a safe API by ensuring:
 //! - References can't escape the closure scope
 //! - No await points possible during access
 //! - Single-threaded execution only
+//!
+//! **IMPORTANT**: You must NOT access a `LocalCell` through multiple clones
+//! simultaneously (e.g., calling `with()` on one clone while inside a `with_mut()`
+//! closure on another clone that points to the same data). This violates Rust's
+//! aliasing rules and results in undefined behavior.
+//!
+//! ```rust,no_run
+//! use localcell::LocalCell;
+//!
+//! let cell = LocalCell::new(vec![1, 2, 3]);
+//! let cell2 = cell.clone();
+//!
+//! // This is UNSOUND and will cause undefined behavior:
+//! cell.with_mut(|v| {
+//!     let len = cell2.with(|v2| v2.len()); // <- Aliasing violation!
+//!     v.push(len as i32);
+//! });
+//! ```
+pub mod mutex;
+pub mod smol_q;
+
 use std::cell::Cell;
 use std::ptr::NonNull;
 
@@ -110,7 +131,7 @@ impl<T> LocalCell<T> {
 
     /// Returns the number of references to the inner value.
     pub fn count(&self) -> usize {
-        unsafe { self.ptr.as_ref().count.get() }
+        unsafe { (*self.ptr.as_ptr()).count.get() }
     }
 }
 
@@ -280,22 +301,6 @@ mod tests {
         let result = cell1.with(|a| cell2.with(|b| *a + *b));
 
         assert_eq!(result, 30);
-    }
-
-    #[test]
-    fn test_self_referential_mutation() {
-        let cell = LocalCell::new(vec![1, 2, 3]);
-        let cell2 = cell.clone();
-
-        cell.with_mut(|v| {
-            // Access through clone while mutating
-            let len = cell2.with(|v2| v2.len());
-            v.push(len as i32);
-        });
-
-        cell.with(|v| {
-            assert_eq!(v, &[1, 2, 3, 3]);
-        });
     }
 
     // Async tests to demonstrate the use case
