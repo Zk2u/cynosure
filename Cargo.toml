@@ -12,3 +12,20 @@ repository = "https://github.com/zk2u/localcell"
 [dev-dependencies]
 futures = "0.3.31"
 monoio = "0.2.4"
+criterion = { version = "0.5", features = ["html_reports"] }
+tokio = { version = "1.0", features = ["sync", "rt"] }
+
+[[bench]]
+name = "localcell"
+harness = false
+path = "benches/localcell.rs"
+
+[[bench]]
+name = "smolqueue"
+harness = false
+path = "benches/smolqueue.rs"
+
+[[bench]]
+name = "mutex"
+harness = false
+path = "benches/mutex.rs"
