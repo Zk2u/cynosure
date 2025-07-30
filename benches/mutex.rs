@@ -1,10 +1,12 @@
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
-use localcell::mutex::LocalMutex;
-use std::future::Future;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll, Wake, Waker},
+};
 
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use cynosure::site_c::mutex::LocalMutex;
 use tokio::sync::Mutex as TokioMutex;
 
 // Simple executor for benchmarking async code

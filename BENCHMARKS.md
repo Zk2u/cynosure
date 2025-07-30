@@ -1,6 +1,4 @@
-# LocalCell Benchmarks
-
-This document provides comprehensive performance analysis of the LocalCell crate components, with benchmarks run on the baseline system described below.
+# Cynosure Benchmarks
 
 ## Baseline System Configuration
 
@@ -21,7 +19,7 @@ This document provides comprehensive performance analysis of the LocalCell crate
 The benchmark suite consists of three main components:
 
 1. **LocalCell** (`cargo bench --bench localcell`) - Core `LocalCell<T>` performance vs `Rc<RefCell<T>>`
-2. **SmolQueue** (`cargo bench --bench smolqueue`) - Stack-optimized queue vs `VecDeque<T>`
+2. **Queue** (`cargo bench --bench queue`) - Stack-optimized queue vs `VecDeque<T>`
 3. **LocalMutex** (`cargo bench --bench mutex`) - Single-threaded async mutex vs `tokio::sync::Mutex<T>`
 
 ## Performance Results
@@ -41,17 +39,17 @@ The benchmark suite consists of three main components:
 - **Zero-cost abstraction achieved** - no runtime borrow checking overhead
 - Slight creation overhead due to additional safety guarantees
 
-### SmolQueue<T, N> vs VecDeque<T>
+### Queue<T, N> vs VecDeque<T>
 
-| Operation | SmolQueue<i32,8> | VecDeque | Difference | Winner |
+| Operation | Queue<i32,8> | VecDeque | Difference | Winner |
 |-----------|------------------|----------|------------|---------|
-| **Single Push** | 5.88ns | 11.75ns | -50% | **SmolQueue** |
-| **Single Pop** | 6.13ns | 11.67ns | -47% | **SmolQueue** |
-| **Push Many (20)** | 106ns | 115ns | -8% | **SmolQueue** |
-| **FIFO Pattern** | 68.0ns | 87.8ns | -22% | **SmolQueue** |
+| **Single Push** | 5.88ns | 11.75ns | -50% | **Queue** |
+| **Single Pop** | 6.13ns | 11.67ns | -47% | **Queue** |
+| **Push Many (20)** | 106ns | 115ns | -8% | **Queue** |
+| **FIFO Pattern** | 68.0ns | 87.8ns | -22% | **Queue** |
 | **Iteration** | 26.3ns | 24.3ns | +8% | VecDeque |
 
-**Stack vs Heap Performance (SmolQueue):**
+**Stack vs Heap Performance (Queue):**
 
 | Capacity | Inline Push | Spill Push | Advantage |
 |----------|-------------|------------|-----------|
@@ -115,19 +113,19 @@ RefCell::borrow_mut:           251ps
 
 The performance is essentially identical (within measurement noise), proving that the compile-time safety guarantees come at zero runtime cost.
 
-### SmolQueue: Stack Optimization Pays Off
+### Queue: Stack Optimization Pays Off
 
 The stack-first approach shows dramatic benefits:
 
 ```
-SmolQueue<i32,8>::push_back:   5.88ns
+Queue<i32,8>::push_back:   5.88ns
 VecDeque::push_back:          11.75ns (100% slower)
 
-SmolQueue<i32,8>::pop_front:   6.13ns
+Queue<i32,8>::pop_front:   6.13ns
 VecDeque::pop_front:          11.67ns (90% slower)
 ```
 
-Even when spilling to heap, SmolQueue remains competitive due to optimized transition logic.
+Even when spilling to heap, Queue remains competitive due to optimized transition logic.
 
 ### LocalMutex: Single-Threaded Advantage
 
@@ -148,12 +146,12 @@ The advantage grows in realistic usage patterns where the single-threaded assump
 ### When These Differences Matter
 
 **High-Frequency Operations:**
-- SmolQueue: 2-5x improvement for small queues matters in hot loops
+- Queue: 2-5x improvement for small queues matters in hot loops
 - LocalMutex: 35% improvement compounds in async task coordination
 - LocalCell: Zero overhead enables fearless refactoring
 
 **Memory-Constrained Environments:**
-- SmolQueue: Reduced allocations and better cache locality
+- Queue: Reduced allocations and better cache locality
 - LocalMutex: Lower memory overhead per mutex instance
 - LocalCell: Simplified reference counting saves 8 bytes per instance
 
@@ -166,7 +164,7 @@ The advantage grows in realistic usage patterns where the single-threaded assump
 These results demonstrate that safety doesn't require sacrificing performance:
 
 1. **LocalCell**: Same performance as unsafe alternatives, better safety
-2. **SmolQueue**: Faster than general-purpose alternatives in common cases
+2. **Queue**: Faster than general-purpose alternatives in common cases
 3. **LocalMutex**: Faster than thread-safe alternatives when thread-safety isn't needed
 
 ## Running Benchmarks
@@ -179,7 +177,7 @@ cargo bench
 
 # Run specific component
 cargo bench --bench localcell
-cargo bench --bench smolqueue
+cargo bench --bench queue
 cargo bench --bench mutex
 
 # Quick mode for development iteration
@@ -239,7 +237,7 @@ These benchmarks use:
 The LocalCell crate delivers on its performance promises:
 
 1. **LocalCell**: Zero-cost abstraction with better safety than alternatives
-2. **SmolQueue**: Significant performance advantages for small, frequently-used queues
+2. **Queue**: Significant performance advantages for small, frequently-used queues
 3. **LocalMutex**: Substantial improvements over thread-safe alternatives in single-threaded contexts
 
 The benchmarks validate that choosing safety and ergonomics doesn't require sacrificing performance when the design is optimized for the target use case.

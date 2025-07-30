@@ -54,9 +54,9 @@ run_specific_test() {
     cargo +nightly miri test --lib "$test_name"
 }
 
-# Function to run SmolQueue tests only
-run_smolqueue_tests() {
-    print_status "Running SmolQueue tests with Miri..."
+# Function to run Queue tests only
+run_queue_tests() {
+    print_status "Running Queue tests with Miri..."
     cargo +nightly miri test --lib smol_q::tests
 }
 
@@ -82,7 +82,7 @@ show_usage() {
     echo ""
     echo "Options:"
     echo "  lib              Run all library tests (default)"
-    echo "  smolqueue        Run only SmolQueue tests"
+    echo "  queue        Run only Queue tests"
     echo "  localcell        Run only LocalCell tests"
     echo "  strict           Run with extra strict checking"
     echo "  test <name>      Run specific test by name"
@@ -90,7 +90,7 @@ show_usage() {
     echo ""
     echo "Examples:"
     echo "  $0                                    # Run all lib tests"
-    echo "  $0 smolqueue                         # Run SmolQueue tests only"
+    echo "  $0 queue                         # Run Queue tests only"
     echo "  $0 strict                            # Run with strict checking"
     echo "  $0 test test_count_during_mutations  # Run specific test"
 }
@@ -100,8 +100,8 @@ case "${1:-lib}" in
     "lib")
         run_lib_tests
         ;;
-    "smolqueue")
-        run_smolqueue_tests
+    "queue")
+        run_queue_tests
         ;;
     "localcell")
         run_localcell_tests

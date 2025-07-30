@@ -1,5 +1,6 @@
-use localcell::mutex::LocalMutex;
 use std::time::Duration;
+
+use cynosure::site_c::mutex::LocalMutex;
 
 #[monoio::test]
 async fn test_basic_lock_unlock() {

@@ -1,13 +1,14 @@
 use std::{collections::VecDeque, mem::MaybeUninit};
 
-/// A VecDeque that stores up to N items inline before spilling to heap
+/// A double-ended queue implemented with a growable ring buffer that stores up
+/// to N items inline before spilling to heap
 ///
 /// # Examples
 ///
 /// ```
-/// use localcell::smol_q::SmolQueue;
+/// use cynosure::site_c::queue::Queue;
 ///
-/// let mut queue: SmolQueue<i32, 4> = SmolQueue::new();
+/// let mut queue: Queue<i32, 4> = Queue::new();
 /// queue.push_back(1);
 /// queue.push_back(2);
 /// queue.push_back(3);
@@ -24,7 +25,7 @@ use std::{collections::VecDeque, mem::MaybeUninit};
 /// let remaining: Vec<i32> = queue.into_iter().collect();
 /// assert_eq!(remaining, vec![2, 3]);
 /// ```
-pub enum SmolQueue<T, const N: usize> {
+pub enum Queue<T, const N: usize> {
     Inline {
         buf: [MaybeUninit<T>; N],
         head: usize,
@@ -34,14 +35,14 @@ pub enum SmolQueue<T, const N: usize> {
     Heap(VecDeque<T>),
 }
 
-impl<T, const N: usize> Default for SmolQueue<T, N> {
+impl<T, const N: usize> Default for Queue<T, N> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<T, const N: usize> SmolQueue<T, N> {
-    /// Creates a new empty SmolQueue
+impl<T, const N: usize> Queue<T, N> {
+    /// Creates a new empty Queue
     #[inline]
     pub fn new() -> Self {
         Self::Inline {
@@ -144,13 +145,13 @@ impl<T, const N: usize> SmolQueue<T, N> {
     }
 }
 
-impl<T: std::fmt::Debug, const N: usize> std::fmt::Debug for SmolQueue<T, N> {
+impl<T: std::fmt::Debug, const N: usize> std::fmt::Debug for Queue<T, N> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_list().entries(self.iter()).finish()
     }
 }
 
-impl<T: Clone, const N: usize> Clone for SmolQueue<T, N> {
+impl<T: Clone, const N: usize> Clone for Queue<T, N> {
     fn clone(&self) -> Self {
         let mut new_queue = Self::new();
         for item in self.iter() {
@@ -160,7 +161,7 @@ impl<T: Clone, const N: usize> Clone for SmolQueue<T, N> {
     }
 }
 
-impl<T: PartialEq, const N: usize> PartialEq for SmolQueue<T, N> {
+impl<T: PartialEq, const N: usize> PartialEq for Queue<T, N> {
     fn eq(&self, other: &Self) -> bool {
         if self.len() != other.len() {
             return false;
@@ -169,9 +170,9 @@ impl<T: PartialEq, const N: usize> PartialEq for SmolQueue<T, N> {
     }
 }
 
-impl<T: Eq, const N: usize> Eq for SmolQueue<T, N> {}
+impl<T: Eq, const N: usize> Eq for Queue<T, N> {}
 
-impl<T, const N: usize> From<Vec<T>> for SmolQueue<T, N> {
+impl<T, const N: usize> From<Vec<T>> for Queue<T, N> {
     fn from(vec: Vec<T>) -> Self {
         let mut queue = Self::new();
         for item in vec {
@@ -181,7 +182,7 @@ impl<T, const N: usize> From<Vec<T>> for SmolQueue<T, N> {
     }
 }
 
-impl<T, const N: usize> From<VecDeque<T>> for SmolQueue<T, N> {
+impl<T, const N: usize> From<VecDeque<T>> for Queue<T, N> {
     fn from(vec_deque: VecDeque<T>) -> Self {
         let mut queue = Self::new();
         for item in vec_deque {
@@ -191,7 +192,7 @@ impl<T, const N: usize> From<VecDeque<T>> for SmolQueue<T, N> {
     }
 }
 
-impl<T, const N: usize> Extend<T> for SmolQueue<T, N> {
+impl<T, const N: usize> Extend<T> for Queue<T, N> {
     fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
         for item in iter {
             self.push_back(item);
@@ -199,7 +200,7 @@ impl<T, const N: usize> Extend<T> for SmolQueue<T, N> {
     }
 }
 
-impl<T, const N: usize> FromIterator<T> for SmolQueue<T, N> {
+impl<T, const N: usize> FromIterator<T> for Queue<T, N> {
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
         let mut queue = Self::new();
         queue.extend(iter);
@@ -207,7 +208,7 @@ impl<T, const N: usize> FromIterator<T> for SmolQueue<T, N> {
     }
 }
 
-impl<T, const N: usize> SmolQueue<T, N> {
+impl<T, const N: usize> Queue<T, N> {
     /// Returns the number of elements in the queue
     #[inline]
     pub fn len(&self) -> usize {
@@ -224,7 +225,7 @@ impl<T, const N: usize> SmolQueue<T, N> {
     }
 }
 
-impl<T, const N: usize> Drop for SmolQueue<T, N> {
+impl<T, const N: usize> Drop for Queue<T, N> {
     fn drop(&mut self) {
         if let Self::Inline { buf, head, len, .. } = self {
             let mut idx = *head;
@@ -313,7 +314,7 @@ impl<T> ExactSizeIterator for IntoIter<T> {
     }
 }
 
-impl<T, const N: usize> IntoIterator for SmolQueue<T, N> {
+impl<T, const N: usize> IntoIterator for Queue<T, N> {
     type Item = T;
     type IntoIter = IntoIter<T>;
 
@@ -325,7 +326,7 @@ impl<T, const N: usize> IntoIterator for SmolQueue<T, N> {
     }
 }
 
-impl<'a, T, const N: usize> IntoIterator for &'a SmolQueue<T, N> {
+impl<'a, T, const N: usize> IntoIterator for &'a Queue<T, N> {
     type Item = &'a T;
     type IntoIter = Iter<'a, T, N>;
 
@@ -340,14 +341,14 @@ mod tests {
 
     #[test]
     fn test_new_queue_is_empty() {
-        let mut queue: SmolQueue<i32, 4> = SmolQueue::new();
+        let mut queue: Queue<i32, 4> = Queue::new();
         assert_eq!(queue.pop_front(), None);
         assert_eq!(queue.take_all(), Vec::<i32>::new());
     }
 
     #[test]
     fn test_single_element() {
-        let mut queue: SmolQueue<i32, 4> = SmolQueue::new();
+        let mut queue: Queue<i32, 4> = Queue::new();
         queue.push_back(42);
         assert_eq!(queue.pop_front(), Some(42));
         assert_eq!(queue.pop_front(), None);
@@ -355,7 +356,7 @@ mod tests {
 
     #[test]
     fn test_fifo_order() {
-        let mut queue: SmolQueue<i32, 4> = SmolQueue::new();
+        let mut queue: Queue<i32, 4> = Queue::new();
         queue.push_back(1);
         queue.push_back(2);
         queue.push_back(3);
@@ -368,13 +369,13 @@ mod tests {
 
     #[test]
     fn test_fill_to_capacity() {
-        let mut queue: SmolQueue<i32, 3> = SmolQueue::new();
+        let mut queue: Queue<i32, 3> = Queue::new();
         queue.push_back(1);
         queue.push_back(2);
         queue.push_back(3);
 
         // Should still be inline
-        if let SmolQueue::Inline { len, .. } = &queue {
+        if let Queue::Inline { len, .. } = &queue {
             assert_eq!(*len, 3);
         } else {
             panic!("Queue should still be inline");
@@ -387,18 +388,18 @@ mod tests {
 
     #[test]
     fn test_spill_to_heap() {
-        let mut queue: SmolQueue<i32, 2> = SmolQueue::new();
+        let mut queue: Queue<i32, 2> = Queue::new();
         queue.push_back(1);
         queue.push_back(2);
 
         // Should be inline
-        assert!(matches!(queue, SmolQueue::Inline { .. }));
+        assert!(matches!(queue, Queue::Inline { .. }));
 
         // This should spill to heap
         queue.push_back(3);
 
         // Should now be heap
-        assert!(matches!(queue, SmolQueue::Heap(_)));
+        assert!(matches!(queue, Queue::Heap(_)));
 
         assert_eq!(queue.pop_front(), Some(1));
         assert_eq!(queue.pop_front(), Some(2));
@@ -408,7 +409,7 @@ mod tests {
 
     #[test]
     fn test_operations_after_spill() {
-        let mut queue: SmolQueue<i32, 2> = SmolQueue::new();
+        let mut queue: Queue<i32, 2> = Queue::new();
 
         // Fill and spill
         queue.push_back(1);
@@ -433,7 +434,7 @@ mod tests {
 
     #[test]
     fn test_circular_buffer_wraparound() {
-        let mut queue: SmolQueue<i32, 3> = SmolQueue::new();
+        let mut queue: Queue<i32, 3> = Queue::new();
 
         // Fill the buffer
         queue.push_back(1);
@@ -457,7 +458,7 @@ mod tests {
 
     #[test]
     fn test_take_all_inline() {
-        let mut queue: SmolQueue<i32, 4> = SmolQueue::new();
+        let mut queue: Queue<i32, 4> = Queue::new();
         queue.push_back(1);
         queue.push_back(2);
         queue.push_back(3);
@@ -470,7 +471,7 @@ mod tests {
 
     #[test]
     fn test_take_all_heap() {
-        let mut queue: SmolQueue<i32, 2> = SmolQueue::new();
+        let mut queue: Queue<i32, 2> = Queue::new();
         queue.push_back(1);
         queue.push_back(2);
         queue.push_back(3); // Spills to heap
@@ -483,7 +484,7 @@ mod tests {
 
     #[test]
     fn test_take_all_with_wraparound() {
-        let mut queue: SmolQueue<i32, 4> = SmolQueue::new();
+        let mut queue: Queue<i32, 4> = Queue::new();
 
         // Fill buffer
         queue.push_back(1);
@@ -506,7 +507,7 @@ mod tests {
 
     #[test]
     fn test_empty_operations() {
-        let mut queue: SmolQueue<i32, 4> = SmolQueue::new();
+        let mut queue: Queue<i32, 4> = Queue::new();
 
         assert_eq!(queue.pop_front(), None);
         assert_eq!(queue.take_all(), Vec::<i32>::new());
@@ -518,7 +519,7 @@ mod tests {
 
     #[test]
     fn test_mixed_operations_sequence() {
-        let mut queue: SmolQueue<i32, 3> = SmolQueue::new();
+        let mut queue: Queue<i32, 3> = Queue::new();
 
         queue.push_back(1);
         assert_eq!(queue.pop_front(), Some(1));
@@ -541,7 +542,7 @@ mod tests {
 
     #[test]
     fn test_capacity_one() {
-        let mut queue: SmolQueue<i32, 1> = SmolQueue::new();
+        let mut queue: Queue<i32, 1> = Queue::new();
 
         queue.push_back(1);
         assert_eq!(queue.pop_front(), Some(1));
@@ -549,14 +550,14 @@ mod tests {
         queue.push_back(2);
         queue.push_back(3); // Should spill to heap
 
-        assert!(matches!(queue, SmolQueue::Heap(_)));
+        assert!(matches!(queue, Queue::Heap(_)));
         assert_eq!(queue.pop_front(), Some(2));
         assert_eq!(queue.pop_front(), Some(3));
     }
 
     #[test]
     fn test_large_sequence() {
-        let mut queue: SmolQueue<i32, 4> = SmolQueue::new();
+        let mut queue: Queue<i32, 4> = Queue::new();
 
         // Add many elements to test heap behavior
         for i in 0..100 {
@@ -581,7 +582,7 @@ mod tests {
 
     #[test]
     fn test_string_elements() {
-        let mut queue: SmolQueue<String, 2> = SmolQueue::new();
+        let mut queue: Queue<String, 2> = Queue::new();
 
         queue.push_back("hello".to_string());
         queue.push_back("world".to_string());
@@ -599,7 +600,7 @@ mod tests {
         #[derive(Clone, PartialEq, Debug)]
         struct TestStruct(i32);
 
-        let mut queue: SmolQueue<TestStruct, 2> = SmolQueue::new();
+        let mut queue: Queue<TestStruct, 2> = Queue::new();
 
         queue.push_back(TestStruct(1));
         queue.push_back(TestStruct(2));
@@ -613,15 +614,15 @@ mod tests {
     #[test]
     fn test_zero_capacity_compiles() {
         // This should compile but immediately spill to heap
-        let mut queue: SmolQueue<i32, 0> = SmolQueue::new();
+        let mut queue: Queue<i32, 0> = Queue::new();
         queue.push_back(1);
-        assert!(matches!(queue, SmolQueue::Heap(_)));
+        assert!(matches!(queue, Queue::Heap(_)));
         assert_eq!(queue.pop_front(), Some(1));
     }
 
     #[test]
     fn test_alternating_push_pop() {
-        let mut queue: SmolQueue<i32, 3> = SmolQueue::new();
+        let mut queue: Queue<i32, 3> = Queue::new();
 
         for i in 0..10 {
             queue.push_back(i);
@@ -633,7 +634,7 @@ mod tests {
 
     #[test]
     fn test_take_all_after_wraparound_edge_case() {
-        let mut queue: SmolQueue<i32, 3> = SmolQueue::new();
+        let mut queue: Queue<i32, 3> = Queue::new();
 
         // Create a specific wraparound scenario
         queue.push_back(1);
@@ -655,7 +656,7 @@ mod tests {
 
     #[test]
     fn test_reuse_after_take_all() {
-        let mut queue: SmolQueue<i32, 3> = SmolQueue::new();
+        let mut queue: Queue<i32, 3> = Queue::new();
 
         queue.push_back(1);
         queue.push_back(2);
@@ -670,7 +671,7 @@ mod tests {
 
     #[test]
     fn test_iter_inline() {
-        let mut queue: SmolQueue<i32, 4> = SmolQueue::new();
+        let mut queue: Queue<i32, 4> = Queue::new();
         queue.push_back(1);
         queue.push_back(2);
         queue.push_back(3);
@@ -684,7 +685,7 @@ mod tests {
 
     #[test]
     fn test_iter_heap() {
-        let mut queue: SmolQueue<i32, 2> = SmolQueue::new();
+        let mut queue: Queue<i32, 2> = Queue::new();
         queue.push_back(1);
         queue.push_back(2);
         queue.push_back(3); // Spills to heap
@@ -698,7 +699,7 @@ mod tests {
 
     #[test]
     fn test_iter_with_wraparound() {
-        let mut queue: SmolQueue<i32, 4> = SmolQueue::new();
+        let mut queue: Queue<i32, 4> = Queue::new();
 
         // Fill buffer
         queue.push_back(1);
@@ -720,14 +721,14 @@ mod tests {
 
     #[test]
     fn test_iter_empty() {
-        let queue: SmolQueue<i32, 4> = SmolQueue::new();
+        let queue: Queue<i32, 4> = Queue::new();
         let items: Vec<&i32> = queue.iter().collect();
         assert_eq!(items, Vec::<&i32>::new());
     }
 
     #[test]
     fn test_into_iter_inline() {
-        let mut queue: SmolQueue<i32, 4> = SmolQueue::new();
+        let mut queue: Queue<i32, 4> = Queue::new();
         queue.push_back(1);
         queue.push_back(2);
         queue.push_back(3);
@@ -738,7 +739,7 @@ mod tests {
 
     #[test]
     fn test_into_iter_heap() {
-        let mut queue: SmolQueue<i32, 2> = SmolQueue::new();
+        let mut queue: Queue<i32, 2> = Queue::new();
         queue.push_back(1);
         queue.push_back(2);
         queue.push_back(3); // Spills to heap
@@ -749,7 +750,7 @@ mod tests {
 
     #[test]
     fn test_iter_size_hint() {
-        let mut queue: SmolQueue<i32, 3> = SmolQueue::new();
+        let mut queue: Queue<i32, 3> = Queue::new();
         queue.push_back(1);
         queue.push_back(2);
 
@@ -768,7 +769,7 @@ mod tests {
 
     #[test]
     fn test_into_iter_size_hint() {
-        let mut queue: SmolQueue<i32, 3> = SmolQueue::new();
+        let mut queue: Queue<i32, 3> = Queue::new();
         queue.push_back(1);
         queue.push_back(2);
 
@@ -783,7 +784,7 @@ mod tests {
 
     #[test]
     fn test_iter_for_loop() {
-        let mut queue: SmolQueue<i32, 3> = SmolQueue::new();
+        let mut queue: Queue<i32, 3> = Queue::new();
         queue.push_back(1);
         queue.push_back(2);
         queue.push_back(3);
@@ -800,7 +801,7 @@ mod tests {
 
     #[test]
     fn test_into_iter_for_loop() {
-        let mut queue: SmolQueue<i32, 3> = SmolQueue::new();
+        let mut queue: Queue<i32, 3> = Queue::new();
         queue.push_back(1);
         queue.push_back(2);
         queue.push_back(3);
@@ -814,7 +815,7 @@ mod tests {
 
     #[test]
     fn test_debug() {
-        let mut queue: SmolQueue<i32, 3> = SmolQueue::new();
+        let mut queue: Queue<i32, 3> = Queue::new();
         queue.push_back(1);
         queue.push_back(2);
         queue.push_back(3);
@@ -825,7 +826,7 @@ mod tests {
 
     #[test]
     fn test_clone() {
-        let mut queue: SmolQueue<i32, 3> = SmolQueue::new();
+        let mut queue: Queue<i32, 3> = Queue::new();
         queue.push_back(1);
         queue.push_back(2);
 
@@ -839,8 +840,8 @@ mod tests {
 
     #[test]
     fn test_partial_eq() {
-        let mut queue1: SmolQueue<i32, 3> = SmolQueue::new();
-        let mut queue2: SmolQueue<i32, 3> = SmolQueue::new();
+        let mut queue1: Queue<i32, 3> = Queue::new();
+        let mut queue2: Queue<i32, 3> = Queue::new();
 
         queue1.push_back(1);
         queue1.push_back(2);
@@ -855,7 +856,7 @@ mod tests {
 
     #[test]
     fn test_default() {
-        let queue: SmolQueue<i32, 3> = SmolQueue::default();
+        let queue: Queue<i32, 3> = Queue::default();
         assert!(queue.is_empty());
         assert_eq!(queue.len(), 0);
     }
@@ -863,7 +864,7 @@ mod tests {
     #[test]
     fn test_from_vec() {
         let vec = vec![1, 2, 3, 4];
-        let queue: SmolQueue<i32, 2> = SmolQueue::from(vec);
+        let queue: Queue<i32, 2> = Queue::from(vec);
 
         let items: Vec<i32> = queue.into_iter().collect();
         assert_eq!(items, vec![1, 2, 3, 4]);
@@ -876,14 +877,14 @@ mod tests {
         vec_deque.push_back(2);
         vec_deque.push_back(3);
 
-        let queue: SmolQueue<i32, 2> = SmolQueue::from(vec_deque);
+        let queue: Queue<i32, 2> = Queue::from(vec_deque);
         let items: Vec<i32> = queue.into_iter().collect();
         assert_eq!(items, vec![1, 2, 3]);
     }
 
     #[test]
     fn test_extend() {
-        let mut queue: SmolQueue<i32, 2> = SmolQueue::new();
+        let mut queue: Queue<i32, 2> = Queue::new();
         queue.push_back(1);
 
         queue.extend(vec![2, 3, 4]);
@@ -893,14 +894,14 @@ mod tests {
 
     #[test]
     fn test_from_iterator() {
-        let queue: SmolQueue<i32, 2> = (1..=4).collect();
+        let queue: Queue<i32, 2> = (1..=4).collect();
         let items: Vec<i32> = queue.into_iter().collect();
         assert_eq!(items, vec![1, 2, 3, 4]);
     }
 
     #[test]
     fn test_len_and_is_empty() {
-        let mut queue: SmolQueue<i32, 3> = SmolQueue::new();
+        let mut queue: Queue<i32, 3> = Queue::new();
         assert_eq!(queue.len(), 0);
         assert!(queue.is_empty());
 
@@ -919,7 +920,7 @@ mod tests {
 
     #[test]
     fn test_len_and_is_empty_after_spill() {
-        let mut queue: SmolQueue<i32, 2> = SmolQueue::new();
+        let mut queue: Queue<i32, 2> = Queue::new();
         queue.push_back(1);
         queue.push_back(2);
         queue.push_back(3); // Spills to heap
@@ -933,11 +934,11 @@ mod tests {
 
     #[test]
     fn test_eq_with_different_storage() {
-        let mut inline_queue: SmolQueue<i32, 4> = SmolQueue::new();
+        let mut inline_queue: Queue<i32, 4> = Queue::new();
         inline_queue.push_back(1);
         inline_queue.push_back(2);
 
-        let mut heap_queue: SmolQueue<i32, 1> = SmolQueue::new();
+        let mut heap_queue: Queue<i32, 1> = Queue::new();
         heap_queue.push_back(1);
         heap_queue.push_back(2); // Spills to heap, contains [1, 2]
 

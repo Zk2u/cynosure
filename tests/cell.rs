@@ -1,5 +1,6 @@
-use localcell::*;
 use std::time::Duration;
+
+use cynosure::site_c::cell::*;
 
 #[monoio::test(timer_enabled = true)]
 async fn test_rate_limiter_pattern() {

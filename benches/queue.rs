@@ -1,29 +1,28 @@
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use localcell::smol_q::SmolQueue;
 use std::collections::VecDeque;
 
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use cynosure::site_c::queue::Queue;
+
 // Basic operations benchmarks
-fn bench_smolqueue_ops(c: &mut Criterion) {
+fn bench_queue_ops(c: &mut Criterion) {
     // Creation benchmarks
-    let mut group = c.benchmark_group("SmolQueue Creation");
-    group.bench_function("new<i32, 4>", |b| b.iter(|| SmolQueue::<i32, 4>::new()));
-    group.bench_function("new<String, 4>", |b| {
-        b.iter(|| SmolQueue::<String, 4>::new())
-    });
+    let mut group = c.benchmark_group("Queue Creation");
+    group.bench_function("new<i32, 4>", |b| b.iter(|| Queue::<i32, 4>::new()));
+    group.bench_function("new<String, 4>", |b| b.iter(|| Queue::<String, 4>::new()));
     group.bench_function("new<Vec<i32>, 4>", |b| {
-        b.iter(|| SmolQueue::<Vec<i32>, 4>::new())
+        b.iter(|| Queue::<Vec<i32>, 4>::new())
     });
     group.finish();
 
     // Push operations with different queue capacities
     // For each capacity, create a specific benchmark
     {
-        let mut group = c.benchmark_group("SmolQueue<i32, 2> Push");
+        let mut group = c.benchmark_group("Queue<i32, 2> Push");
 
         // Inline case (fewer items than capacity)
         group.bench_function("push_back_inline", |b| {
             b.iter(|| {
-                let mut queue = SmolQueue::<i32, 2>::new();
+                let mut queue = Queue::<i32, 2>::new();
                 for i in 0..1 {
                     queue.push_back(black_box(i as i32));
                 }
@@ -34,7 +33,7 @@ fn bench_smolqueue_ops(c: &mut Criterion) {
         // Spill-to-heap case (more items than capacity)
         group.bench_function("push_back_spill", |b| {
             b.iter(|| {
-                let mut queue = SmolQueue::<i32, 2>::new();
+                let mut queue = Queue::<i32, 2>::new();
                 for i in 0..6 {
                     queue.push_back(black_box(i as i32));
                 }
@@ -46,12 +45,12 @@ fn bench_smolqueue_ops(c: &mut Criterion) {
     }
 
     {
-        let mut group = c.benchmark_group("SmolQueue<i32, 4> Push");
+        let mut group = c.benchmark_group("Queue<i32, 4> Push");
 
         // Inline case (fewer items than capacity)
         group.bench_function("push_back_inline", |b| {
             b.iter(|| {
-                let mut queue = SmolQueue::<i32, 4>::new();
+                let mut queue = Queue::<i32, 4>::new();
                 for i in 0..3 {
                     queue.push_back(black_box(i as i32));
                 }
@@ -62,7 +61,7 @@ fn bench_smolqueue_ops(c: &mut Criterion) {
         // Spill-to-heap case (more items than capacity)
         group.bench_function("push_back_spill", |b| {
             b.iter(|| {
-                let mut queue = SmolQueue::<i32, 4>::new();
+                let mut queue = Queue::<i32, 4>::new();
                 for i in 0..8 {
                     queue.push_back(black_box(i as i32));
                 }
@@ -74,12 +73,12 @@ fn bench_smolqueue_ops(c: &mut Criterion) {
     }
 
     {
-        let mut group = c.benchmark_group("SmolQueue<i32, 8> Push");
+        let mut group = c.benchmark_group("Queue<i32, 8> Push");
 
         // Inline case (fewer items than capacity)
         group.bench_function("push_back_inline", |b| {
             b.iter(|| {
-                let mut queue = SmolQueue::<i32, 8>::new();
+                let mut queue = Queue::<i32, 8>::new();
                 for i in 0..7 {
                     queue.push_back(black_box(i as i32));
                 }
@@ -90,7 +89,7 @@ fn bench_smolqueue_ops(c: &mut Criterion) {
         // Spill-to-heap case (more items than capacity)
         group.bench_function("push_back_spill", |b| {
             b.iter(|| {
-                let mut queue = SmolQueue::<i32, 8>::new();
+                let mut queue = Queue::<i32, 8>::new();
                 for i in 0..12 {
                     queue.push_back(black_box(i as i32));
                 }
@@ -102,12 +101,12 @@ fn bench_smolqueue_ops(c: &mut Criterion) {
     }
 
     {
-        let mut group = c.benchmark_group("SmolQueue<i32, 16> Push");
+        let mut group = c.benchmark_group("Queue<i32, 16> Push");
 
         // Inline case (fewer items than capacity)
         group.bench_function("push_back_inline", |b| {
             b.iter(|| {
-                let mut queue = SmolQueue::<i32, 16>::new();
+                let mut queue = Queue::<i32, 16>::new();
                 for i in 0..15 {
                     queue.push_back(black_box(i as i32));
                 }
@@ -118,7 +117,7 @@ fn bench_smolqueue_ops(c: &mut Criterion) {
         // Spill-to-heap case (more items than capacity)
         group.bench_function("push_back_spill", |b| {
             b.iter(|| {
-                let mut queue = SmolQueue::<i32, 16>::new();
+                let mut queue = Queue::<i32, 16>::new();
                 for i in 0..20 {
                     queue.push_back(black_box(i as i32));
                 }
@@ -131,12 +130,12 @@ fn bench_smolqueue_ops(c: &mut Criterion) {
 
     // Pop operations
     {
-        let mut group = c.benchmark_group("SmolQueue<i32, 4> Pop");
+        let mut group = c.benchmark_group("Queue<i32, 4> Pop");
 
         // Pop from inline
         group.bench_function("pop_front_inline", |b| {
             b.iter(|| {
-                let mut queue = SmolQueue::<i32, 4>::new();
+                let mut queue = Queue::<i32, 4>::new();
                 for i in 0..3 {
                     queue.push_back(i as i32);
                 }
@@ -149,7 +148,7 @@ fn bench_smolqueue_ops(c: &mut Criterion) {
         // Pop from heap
         group.bench_function("pop_front_heap", |b| {
             b.iter(|| {
-                let mut queue = SmolQueue::<i32, 4>::new();
+                let mut queue = Queue::<i32, 4>::new();
                 for i in 0..8 {
                     queue.push_back(i as i32);
                 }
@@ -163,12 +162,12 @@ fn bench_smolqueue_ops(c: &mut Criterion) {
     }
 
     {
-        let mut group = c.benchmark_group("SmolQueue<i32, 8> Pop");
+        let mut group = c.benchmark_group("Queue<i32, 8> Pop");
 
         // Pop from inline
         group.bench_function("pop_front_inline", |b| {
             b.iter(|| {
-                let mut queue = SmolQueue::<i32, 8>::new();
+                let mut queue = Queue::<i32, 8>::new();
                 for i in 0..7 {
                     queue.push_back(i as i32);
                 }
@@ -181,7 +180,7 @@ fn bench_smolqueue_ops(c: &mut Criterion) {
         // Pop from heap
         group.bench_function("pop_front_heap", |b| {
             b.iter(|| {
-                let mut queue = SmolQueue::<i32, 8>::new();
+                let mut queue = Queue::<i32, 8>::new();
                 for i in 0..12 {
                     queue.push_back(i as i32);
                 }
@@ -196,12 +195,12 @@ fn bench_smolqueue_ops(c: &mut Criterion) {
 
     // Take all operations
     {
-        let mut group = c.benchmark_group("SmolQueue<i32, 4> Take All");
+        let mut group = c.benchmark_group("Queue<i32, 4> Take All");
 
         // Take all from inline
         group.bench_function("take_all_inline", |b| {
             b.iter(|| {
-                let mut queue = SmolQueue::<i32, 4>::new();
+                let mut queue = Queue::<i32, 4>::new();
                 for i in 0..3 {
                     queue.push_back(i as i32);
                 }
@@ -212,7 +211,7 @@ fn bench_smolqueue_ops(c: &mut Criterion) {
         // Take all from heap
         group.bench_function("take_all_heap", |b| {
             b.iter(|| {
-                let mut queue = SmolQueue::<i32, 4>::new();
+                let mut queue = Queue::<i32, 4>::new();
                 for i in 0..8 {
                     queue.push_back(i as i32);
                 }
@@ -224,12 +223,12 @@ fn bench_smolqueue_ops(c: &mut Criterion) {
     }
 
     {
-        let mut group = c.benchmark_group("SmolQueue<i32, 8> Take All");
+        let mut group = c.benchmark_group("Queue<i32, 8> Take All");
 
         // Take all from inline
         group.bench_function("take_all_inline", |b| {
             b.iter(|| {
-                let mut queue = SmolQueue::<i32, 8>::new();
+                let mut queue = Queue::<i32, 8>::new();
                 for i in 0..7 {
                     queue.push_back(i as i32);
                 }
@@ -240,7 +239,7 @@ fn bench_smolqueue_ops(c: &mut Criterion) {
         // Take all from heap
         group.bench_function("take_all_heap", |b| {
             b.iter(|| {
-                let mut queue = SmolQueue::<i32, 8>::new();
+                let mut queue = Queue::<i32, 8>::new();
                 for i in 0..12 {
                     queue.push_back(i as i32);
                 }
@@ -253,13 +252,13 @@ fn bench_smolqueue_ops(c: &mut Criterion) {
 
     // Iteration operations
     {
-        let mut group = c.benchmark_group("SmolQueue<i32, 4> Iteration");
+        let mut group = c.benchmark_group("Queue<i32, 4> Iteration");
 
         // Iterate inline
         group.bench_function("iter_inline", |b| {
             b.iter_batched(
                 || {
-                    let mut queue = SmolQueue::<i32, 4>::new();
+                    let mut queue = Queue::<i32, 4>::new();
                     for i in 0..3 {
                         queue.push_back(i as i32);
                     }
@@ -280,7 +279,7 @@ fn bench_smolqueue_ops(c: &mut Criterion) {
         group.bench_function("iter_heap", |b| {
             b.iter_batched(
                 || {
-                    let mut queue = SmolQueue::<i32, 4>::new();
+                    let mut queue = Queue::<i32, 4>::new();
                     for i in 0..8 {
                         queue.push_back(i as i32);
                     }
@@ -301,13 +300,13 @@ fn bench_smolqueue_ops(c: &mut Criterion) {
     }
 
     {
-        let mut group = c.benchmark_group("SmolQueue<i32, 8> Iteration");
+        let mut group = c.benchmark_group("Queue<i32, 8> Iteration");
 
         // Iterate inline
         group.bench_function("iter_inline", |b| {
             b.iter_batched(
                 || {
-                    let mut queue = SmolQueue::<i32, 8>::new();
+                    let mut queue = Queue::<i32, 8>::new();
                     for i in 0..7 {
                         queue.push_back(i as i32);
                     }
@@ -328,7 +327,7 @@ fn bench_smolqueue_ops(c: &mut Criterion) {
         group.bench_function("iter_heap", |b| {
             b.iter_batched(
                 || {
-                    let mut queue = SmolQueue::<i32, 8>::new();
+                    let mut queue = Queue::<i32, 8>::new();
                     for i in 0..12 {
                         queue.push_back(i as i32);
                     }
@@ -351,12 +350,12 @@ fn bench_smolqueue_ops(c: &mut Criterion) {
 
 // Comparison with VecDeque
 fn bench_comparison(c: &mut Criterion) {
-    let mut group = c.benchmark_group("SmolQueue vs VecDeque");
+    let mut group = c.benchmark_group("Queue vs VecDeque");
 
     // Push single item
-    group.bench_function("SmolQueue<i32, 8>::push_back", |b| {
+    group.bench_function("Queue<i32, 8>::push_back", |b| {
         b.iter_batched(
-            || SmolQueue::<i32, 8>::new(),
+            || Queue::<i32, 8>::new(),
             |mut queue| queue.push_back(black_box(42)),
             criterion::BatchSize::SmallInput,
         )
@@ -371,10 +370,10 @@ fn bench_comparison(c: &mut Criterion) {
     });
 
     // Pop single item
-    group.bench_function("SmolQueue<i32, 8>::pop_front", |b| {
+    group.bench_function("Queue<i32, 8>::pop_front", |b| {
         b.iter_batched(
             || {
-                let mut queue = SmolQueue::<i32, 8>::new();
+                let mut queue = Queue::<i32, 8>::new();
                 queue.push_back(42);
                 queue
             },
@@ -396,9 +395,9 @@ fn bench_comparison(c: &mut Criterion) {
     });
 
     // Push many items
-    group.bench_function("SmolQueue<i32, 8>::push_many", |b| {
+    group.bench_function("Queue<i32, 8>::push_many", |b| {
         b.iter(|| {
-            let mut queue = SmolQueue::<i32, 8>::new();
+            let mut queue = Queue::<i32, 8>::new();
             for i in 0..20 {
                 queue.push_back(black_box(i));
             }
@@ -417,10 +416,10 @@ fn bench_comparison(c: &mut Criterion) {
     });
 
     // Iteration
-    group.bench_function("SmolQueue<i32, 8>::iteration", |b| {
+    group.bench_function("Queue<i32, 8>::iteration", |b| {
         b.iter_batched(
             || {
-                let mut queue = SmolQueue::<i32, 8>::new();
+                let mut queue = Queue::<i32, 8>::new();
                 for i in 0..20 {
                     queue.push_back(i);
                 }
@@ -465,9 +464,9 @@ fn bench_realistic_usage(c: &mut Criterion) {
     let mut group = c.benchmark_group("Realistic Usage");
 
     // FIFO queue pattern
-    group.bench_function("SmolQueue<i32, 8> FIFO", |b| {
+    group.bench_function("Queue<i32, 8> FIFO", |b| {
         b.iter(|| {
-            let mut queue = SmolQueue::<i32, 8>::new();
+            let mut queue = Queue::<i32, 8>::new();
 
             // Fill queue
             for i in 0..16 {
@@ -518,9 +517,9 @@ fn bench_realistic_usage(c: &mut Criterion) {
     });
 
     // Mixed operations pattern
-    group.bench_function("SmolQueue<i32, 4> mixed ops", |b| {
+    group.bench_function("Queue<i32, 4> mixed ops", |b| {
         b.iter(|| {
-            let mut queue = SmolQueue::<i32, 4>::new();
+            let mut queue = Queue::<i32, 4>::new();
 
             for _ in 0..5 {
                 // Add a few items
@@ -593,7 +592,7 @@ fn bench_realistic_usage(c: &mut Criterion) {
 // Define the benchmark group
 criterion_group!(
     benches,
-    bench_smolqueue_ops,
+    bench_queue_ops,
     bench_comparison,
     bench_realistic_usage,
 );

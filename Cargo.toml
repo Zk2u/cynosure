@@ -1,11 +1,11 @@
 [package]
-name = "localcell"
-description = "Compile-time checked mutable shared memory container for single-threaded async runtimes"
-version = "1.1.0"
+name = "cynosure"
+description = "High performance data structures & primitives from beyond the Blackwall"
+version = "0.1.0"
 edition = "2024"
 license = "MIT"
 authors = ["zk2u <zk2u@pm.me>"]
-repository = "https://github.com/zk2u/localcell"
+repository = "https://github.com/zk2u/cynosure"
 
 [dependencies]
 
@@ -21,9 +21,9 @@ harness = false
 path = "benches/localcell.rs"
 
 [[bench]]
-name = "smolqueue"
+name = "queue"
 harness = false
-path = "benches/smolqueue.rs"
+path = "benches/queue.rs"
 
 [[bench]]
 name = "mutex"

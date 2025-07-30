@@ -49,8 +49,8 @@ chmod +x miri-test.sh
 # Run all library tests (excluding async tests)
 ./miri-test.sh
 
-# Run only SmolQueue tests
-./miri-test.sh smolqueue
+# Run only Queue tests
+./miri-test.sh queue
 
 # Run only LocalCell tests
 ./miri-test.sh localcell
@@ -131,7 +131,7 @@ unsafe { (*self.ptr.as_ptr()).count.get() }
 
 **Cause**: Usually double-drop issues or accessing moved memory.
 
-**Example**: The SmolQueue double-drop bug we fixed where elements were read with `assume_init_read()` but the Drop implementation still tried to drop them.
+**Example**: The Queue double-drop bug we fixed where elements were read with `assume_init_read()` but the Drop implementation still tried to drop them.
 
 ### 4. Uninitialized Memory
 
@@ -195,9 +195,9 @@ let len = cell.with(|v| v.len()); // Get length first
 cell.with_mut(|v| v.push(len as i32)); // Then mutate
 ```
 
-### SmolQueue Memory Safety
+### Queue Memory Safety
 
-The SmolQueue implementation required several fixes for Miri compliance:
+The Queue implementation required several fixes for Miri compliance:
 
 1. **Proper array initialization**: Using `[const { MaybeUninit::uninit() }; N]`
 2. **Double-drop prevention**: Setting `len = 0` before heap transitions

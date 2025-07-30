@@ -1,7 +1,7 @@
+use std::{cell::RefCell, rc::Rc};
+
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use localcell::LocalCell;
-use std::cell::RefCell;
-use std::rc::Rc;
+use cynosure::site_c::cell::LocalCell;
 
 // Benchmark basic operations
 fn bench_localcell_ops(c: &mut Criterion) {

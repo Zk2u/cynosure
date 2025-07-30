@@ -1,10 +1,11 @@
-use std::future::Future;
-use std::ops::{Deref, DerefMut};
-use std::pin::Pin;
-use std::task::{Context, Poll, Waker};
+use std::{
+    future::Future,
+    ops::{Deref, DerefMut},
+    pin::Pin,
+    task::{Context, Poll, Waker},
+};
 
-use crate::LocalCell;
-use crate::smol_q::SmolQueue;
+use super::{cell::LocalCell, queue::Queue};
 
 /// A mutual exclusion primitive for single-threaded async executors.
 ///
@@ -18,7 +19,7 @@ pub struct LocalMutex<T> {
 struct MutexState<T, const QUEUE_STACK_SIZE: usize = 8> {
     locked: bool,
     value: T,
-    waiters: SmolQueue<Waker, QUEUE_STACK_SIZE>,
+    waiters: Queue<Waker, QUEUE_STACK_SIZE>,
 }
 
 impl<T> LocalMutex<T> {

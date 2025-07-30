@@ -11,7 +11,7 @@ The benchmarks are organized into three main suites:
    - Comparison with `Rc<RefCell<T>>`
    - Realistic usage patterns
 
-2. **SmolQueue Benchmarks** - Tests the stack-optimized queue implementation
+2. **Queue Benchmarks** - Tests the stack-optimized queue implementation
    - Operations with different capacities (inline vs heap storage)
    - Comparison with `VecDeque`
    - FIFO patterns and mixed operations
@@ -34,8 +34,8 @@ cargo bench
 # Run only LocalCell benchmarks
 cargo bench --bench localcell
 
-# Run only SmolQueue benchmarks
-cargo bench --bench smolqueue
+# Run only Queue benchmarks
+cargo bench --bench queue
 
 # Run only LocalMutex benchmarks
 cargo bench --bench mutex
@@ -44,7 +44,7 @@ cargo bench --bench mutex
 cargo bench --bench localcell -- "LocalCell Creation"
 
 # Filter benchmarks by name
-cargo bench --bench smolqueue -- "push_back"
+cargo bench --bench queue -- "push_back"
 ```
 
 ## Interpreting Results
@@ -79,7 +79,7 @@ For valid and reliable benchmarks:
 These benchmarks include comparisons with standard library and ecosystem alternatives:
 
 - `LocalCell<T>` vs `Rc<RefCell<T>>`
-- `SmolQueue<T, N>` vs `VecDeque<T>`
+- `Queue<T, N>` vs `VecDeque<T>`
 - `LocalMutex<T>` vs `tokio::sync::Mutex<T>` (wrapped in `Arc`)
 
 The comparison focuses on:
@@ -95,6 +95,6 @@ You can customize the benchmark parameters by modifying the source files. Some e
 
 - Change data sizes in vector tests
 - Adjust the number of waiters in mutex tests
-- Modify the stack capacity of SmolQueue
+- Modify the stack capacity of Queue
 
 After changing parameters, run the benchmarks again to see the impact on performance.
