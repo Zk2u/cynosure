@@ -21,7 +21,7 @@ use std::{
     task::{Context, Poll, Waker},
 };
 
-use crate::CachePadded;
+use crate::{CachePadded, blocking::block_on};
 
 /// Shared ring buffer state
 struct RingBufferShared<T> {
@@ -320,6 +320,19 @@ impl<T> Producer<T> {
         self.free_count() == 0
     }
 
+    /// Push an item synchronously, blocking if the buffer is full
+    pub fn push_blocking(&mut self, value: T) {
+        block_on(self.push(value))
+    }
+
+    /// Push multiple items synchronously, blocking until all are pushed
+    pub fn push_slice_blocking(&mut self, items: &[T])
+    where
+        T: Copy,
+    {
+        block_on(self.push_slice(items))
+    }
+
     /// Wake the consumer if it's waiting
     fn wake_consumer(&self) {
         if self.shared.consumer_waker_set.swap(false, Ordering::AcqRel) {
@@ -334,8 +347,22 @@ impl<T> Producer<T> {
 
 impl std::io::Write for Producer<u8> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        // Use try_push_slice for more efficient bulk write
-        Ok(self.try_push_slice(buf))
+        if buf.is_empty() {
+            return Ok(0);
+        }
+
+        // First try non-blocking
+        let n = self.try_push_slice(buf);
+        if n > 0 {
+            return Ok(n);
+        }
+
+        // Block until we can write at least one byte
+        self.push_blocking(buf[0]);
+
+        // Try to write more without blocking
+        let additional = self.try_push_slice(&buf[1..]);
+        Ok(1 + additional)
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -524,6 +551,19 @@ impl<T> Consumer<T> {
         write.wrapping_sub(read) >= self.shared.capacity
     }
 
+    /// Pop an item synchronously, blocking if the buffer is empty
+    pub fn pop_blocking(&mut self) -> T {
+        block_on(self.pop())
+    }
+
+    /// Pop multiple items synchronously, blocking until all are popped
+    pub fn pop_slice_blocking(&mut self, items: &mut [T])
+    where
+        T: Copy,
+    {
+        block_on(self.pop_slice(items))
+    }
+
     /// Wake the producer if it's waiting
     fn wake_producer(&self) {
         if self.shared.producer_waker_set.swap(false, Ordering::AcqRel) {
@@ -538,8 +578,23 @@ impl<T> Consumer<T> {
 
 impl std::io::Read for Consumer<u8> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        // Use try_pop_slice for more efficient bulk read
-        Ok(self.try_pop_slice(buf))
+        // Block if no data is available
+        if buf.is_empty() {
+            return Ok(0);
+        }
+
+        // First try non-blocking
+        let n = self.try_pop_slice(buf);
+        if n > 0 {
+            return Ok(n);
+        }
+
+        // Block for at least one byte
+        buf[0] = self.pop_blocking();
+
+        // Try to fill the rest of the buffer without blocking
+        let additional = self.try_pop_slice(&mut buf[1..]);
+        Ok(1 + additional)
     }
 }
 
@@ -786,14 +841,10 @@ mod tests {
         let rb = RingBuf::<u8>::new(16);
         let (mut producer, mut consumer) = rb.split();
 
-        // Write a larger chunk
+        // Write a full buffer
         let data = b"0123456789ABCDEF";
         let written = producer.write(data).unwrap();
         assert_eq!(written, 16);
-
-        // Try to write more (should return 0)
-        let written = producer.write(b"X").unwrap();
-        assert_eq!(written, 0);
 
         // Read in smaller chunks
         let mut buf = [0u8; 4];
@@ -803,9 +854,9 @@ mod tests {
             assert_eq!(&buf[..], expected);
         }
 
-        // Buffer should be empty now
-        let read = consumer.read(&mut buf).unwrap();
-        assert_eq!(read, 0);
+        // Now we can write again
+        let written = producer.write(b"X").unwrap();
+        assert_eq!(written, 1);
     }
 
     #[test]
