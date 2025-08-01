@@ -11,9 +11,18 @@ use crate::hints::{likely, unlikely};
 /// use cynosure::site_c::queue::Queue;
 ///
 /// let mut queue: Queue<i32, 4> = Queue::new();
+///
+/// // Push to both ends
 /// queue.push_back(1);
 /// queue.push_back(2);
-/// queue.push_back(3);
+/// queue.push_front(3);
+/// queue.push_front(4);
+///
+/// // Queue is now: [4, 3, 1, 2]
+///
+/// // Pop from both ends
+/// assert_eq!(queue.pop_front(), Some(4));
+/// assert_eq!(queue.pop_back(), Some(2));
 ///
 /// // Iterate over references (non-consuming)
 /// for value in &queue {
@@ -21,11 +30,11 @@ use crate::hints::{likely, unlikely};
 /// }
 ///
 /// // Queue is still usable
-/// assert_eq!(queue.pop_front(), Some(1));
+/// assert_eq!(queue.pop_front(), Some(3));
 ///
 /// // Consume the queue with into_iter
 /// let remaining: Vec<i32> = queue.into_iter().collect();
-/// assert_eq!(remaining, vec![2, 3]);
+/// assert_eq!(remaining, vec![1]);
 /// ```
 pub enum Queue<T, const N: usize> {
     Inline {
@@ -92,6 +101,43 @@ impl<T, const N: usize> Queue<T, N> {
         }
     }
 
+    /// Adds an element to the front of the queue
+    #[inline]
+    pub fn push_front(&mut self, value: T) {
+        match self {
+            Self::Inline {
+                buf,
+                head,
+                tail: _,
+                len,
+            } => {
+                if likely(*len < N) {
+                    *head = if unlikely(*head == 0) {
+                        N - 1
+                    } else {
+                        *head - 1
+                    };
+                    buf[*head] = MaybeUninit::new(value);
+                    *len += 1;
+                } else {
+                    // Spill to heap - move elements in order from circular buffer
+                    let mut heap = VecDeque::with_capacity(N * 2);
+                    heap.push_front(value);
+
+                    let mut idx = *head;
+                    for _ in 0..*len {
+                        let val = unsafe { buf[idx].assume_init_read() };
+                        heap.push_back(val);
+                        idx = if unlikely(idx + 1 == N) { 0 } else { idx + 1 };
+                    }
+                    *len = 0; // Prevent double-drop when Self::Inline is dropped
+                    *self = Self::Heap(heap);
+                }
+            }
+            Self::Heap(vec) => vec.push_front(value),
+        }
+    }
+
     /// Removes and returns the element at the front of the queue
     #[inline]
     pub fn pop_front(&mut self) -> Option<T> {
@@ -111,6 +157,28 @@ impl<T, const N: usize> Queue<T, N> {
                 }
             }
             Self::Heap(vec) => vec.pop_front(),
+        }
+    }
+
+    /// Removes and returns the element at the back of the queue
+    #[inline]
+    pub fn pop_back(&mut self) -> Option<T> {
+        match self {
+            Self::Inline { buf, tail, len, .. } => {
+                if unlikely(*len == 0) {
+                    None
+                } else {
+                    *tail = if unlikely(*tail == 0) {
+                        N - 1
+                    } else {
+                        *tail - 1
+                    };
+                    let value = unsafe { buf[*tail].assume_init_read() };
+                    *len -= 1;
+                    Some(value)
+                }
+            }
+            Self::Heap(vec) => vec.pop_back(),
         }
     }
 
@@ -956,5 +1024,127 @@ mod tests {
         let inline_contents: Vec<_> = inline_queue.iter().collect();
         let heap_contents: Vec<_> = heap_queue.iter().collect();
         assert_eq!(inline_contents, heap_contents);
+    }
+
+    #[test]
+    fn test_push_front_basic() {
+        let mut queue: Queue<i32, 4> = Queue::new();
+        queue.push_front(1);
+        queue.push_front(2);
+        queue.push_front(3);
+
+        assert_eq!(queue.pop_front(), Some(3));
+        assert_eq!(queue.pop_front(), Some(2));
+        assert_eq!(queue.pop_front(), Some(1));
+        assert_eq!(queue.pop_front(), None);
+    }
+
+    #[test]
+    fn test_pop_back_basic() {
+        let mut queue: Queue<i32, 4> = Queue::new();
+        queue.push_back(1);
+        queue.push_back(2);
+        queue.push_back(3);
+
+        assert_eq!(queue.pop_back(), Some(3));
+        assert_eq!(queue.pop_back(), Some(2));
+        assert_eq!(queue.pop_back(), Some(1));
+        assert_eq!(queue.pop_back(), None);
+    }
+
+    #[test]
+    fn test_mixed_push_front_back() {
+        let mut queue: Queue<i32, 4> = Queue::new();
+        queue.push_back(1);
+        queue.push_front(2);
+        queue.push_back(3);
+        queue.push_front(4);
+
+        // Queue should be: [4, 2, 1, 3]
+        assert_eq!(queue.pop_front(), Some(4));
+        assert_eq!(queue.pop_back(), Some(3));
+        assert_eq!(queue.pop_front(), Some(2));
+        assert_eq!(queue.pop_back(), Some(1));
+        assert_eq!(queue.pop_front(), None);
+    }
+
+    #[test]
+    fn test_push_front_spill_to_heap() {
+        let mut queue: Queue<i32, 3> = Queue::new();
+        queue.push_front(1);
+        queue.push_front(2);
+        queue.push_front(3);
+
+        // This should trigger spill to heap
+        queue.push_front(4);
+
+        // Verify order is preserved
+        assert_eq!(queue.pop_front(), Some(4));
+        assert_eq!(queue.pop_front(), Some(3));
+        assert_eq!(queue.pop_front(), Some(2));
+        assert_eq!(queue.pop_front(), Some(1));
+    }
+
+    #[test]
+    fn test_wraparound_with_push_front_pop_back() {
+        let mut queue: Queue<i32, 4> = Queue::new();
+
+        // Fill partially and create wraparound
+        queue.push_back(1);
+        queue.push_back(2);
+        assert_eq!(queue.pop_front(), Some(1));
+
+        queue.push_front(3);
+        queue.push_back(4);
+        queue.push_front(5);
+
+        // Queue should be: [5, 3, 2, 4]
+        assert_eq!(queue.pop_back(), Some(4));
+        assert_eq!(queue.pop_front(), Some(5));
+        assert_eq!(queue.pop_back(), Some(2));
+        assert_eq!(queue.pop_front(), Some(3));
+    }
+
+    #[test]
+    fn test_alternating_all_operations() {
+        let mut queue: Queue<i32, 5> = Queue::new();
+
+        queue.push_back(1);
+        queue.push_front(2);
+        assert_eq!(queue.pop_back(), Some(1));
+
+        queue.push_back(3);
+        queue.push_front(4);
+        queue.push_back(5);
+        assert_eq!(queue.pop_front(), Some(4));
+
+        queue.push_front(6);
+        assert_eq!(queue.pop_back(), Some(5));
+
+        // Queue should now have: [6, 2, 3]
+        assert_eq!(queue.len(), 3);
+
+        let vec: Vec<i32> = queue.iter().copied().collect();
+        assert_eq!(vec, vec![6, 2, 3]);
+    }
+
+    #[test]
+    fn test_push_front_pop_back_after_spill() {
+        let mut queue: Queue<i32, 2> = Queue::new();
+
+        // Fill to capacity
+        queue.push_back(1);
+        queue.push_back(2);
+
+        // Spill to heap
+        queue.push_back(3);
+
+        // Test operations work correctly on heap storage
+        queue.push_front(4);
+        queue.push_back(5);
+
+        assert_eq!(queue.pop_back(), Some(5));
+        assert_eq!(queue.pop_front(), Some(4));
+        assert_eq!(queue.len(), 3);
     }
 }
