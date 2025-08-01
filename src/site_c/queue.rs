@@ -36,7 +36,9 @@ use crate::hints::{likely, unlikely};
 /// let remaining: Vec<i32> = queue.into_iter().collect();
 /// assert_eq!(remaining, vec![1]);
 /// ```
-pub enum Queue<T, const N: usize> {
+pub struct Queue<T, const N: usize>(QueueInternal<T, N>);
+
+enum QueueInternal<T, const N: usize> {
     Inline {
         buf: [MaybeUninit<T>; N],
         head: usize,
@@ -56,12 +58,12 @@ impl<T, const N: usize> Queue<T, N> {
     /// Creates a new empty Queue
     #[inline]
     pub fn new() -> Self {
-        Self::Inline {
+        Self(QueueInternal::Inline {
             buf: [const { MaybeUninit::uninit() }; N],
             head: 0,
             tail: 0,
             len: 0,
-        }
+        })
     }
 
     /// Creates a new Queue with space for at least `capacity` elements
@@ -70,15 +72,15 @@ impl<T, const N: usize> Queue<T, N> {
         if capacity <= N {
             Self::new()
         } else {
-            Self::Heap(VecDeque::with_capacity(capacity))
+            Self(QueueInternal::Heap(VecDeque::with_capacity(capacity)))
         }
     }
 
     /// Adds an element to the back of the queue
     #[inline]
     pub fn push_back(&mut self, value: T) {
-        match self {
-            Self::Inline {
+        match &mut self.0 {
+            QueueInternal::Inline {
                 buf,
                 head,
                 tail,
@@ -104,18 +106,18 @@ impl<T, const N: usize> Queue<T, N> {
                     }
                     heap.push_back(value);
                     *len = 0; // Prevent double-drop when Self::Inline is dropped
-                    *self = Self::Heap(heap);
+                    self.0 = QueueInternal::Heap(heap);
                 }
             }
-            Self::Heap(vec) => vec.push_back(value),
+            QueueInternal::Heap(vec) => vec.push_back(value),
         }
     }
 
     /// Adds an element to the front of the queue
     #[inline]
     pub fn push_front(&mut self, value: T) {
-        match self {
-            Self::Inline {
+        match &mut self.0 {
+            QueueInternal::Inline {
                 buf,
                 head,
                 tail: _,
@@ -141,18 +143,18 @@ impl<T, const N: usize> Queue<T, N> {
                         idx = if unlikely(idx + 1 == N) { 0 } else { idx + 1 };
                     }
                     *len = 0; // Prevent double-drop when Self::Inline is dropped
-                    *self = Self::Heap(heap);
+                    self.0 = QueueInternal::Heap(heap);
                 }
             }
-            Self::Heap(vec) => vec.push_front(value),
+            QueueInternal::Heap(vec) => vec.push_front(value),
         }
     }
 
     /// Removes and returns the element at the front of the queue
     #[inline]
     pub fn pop_front(&mut self) -> Option<T> {
-        match self {
-            Self::Inline { buf, head, len, .. } => {
+        match &mut self.0 {
+            QueueInternal::Inline { buf, head, len, .. } => {
                 if unlikely(*len == 0) {
                     None
                 } else {
@@ -166,15 +168,15 @@ impl<T, const N: usize> Queue<T, N> {
                     Some(value)
                 }
             }
-            Self::Heap(vec) => vec.pop_front(),
+            QueueInternal::Heap(vec) => vec.pop_front(),
         }
     }
 
     /// Removes and returns the element at the back of the queue
     #[inline]
     pub fn pop_back(&mut self) -> Option<T> {
-        match self {
-            Self::Inline { buf, tail, len, .. } => {
+        match &mut self.0 {
+            QueueInternal::Inline { buf, tail, len, .. } => {
                 if unlikely(*len == 0) {
                     None
                 } else {
@@ -188,14 +190,14 @@ impl<T, const N: usize> Queue<T, N> {
                     Some(value)
                 }
             }
-            Self::Heap(vec) => vec.pop_back(),
+            QueueInternal::Heap(vec) => vec.pop_back(),
         }
     }
 
     /// Removes and returns all elements from the queue as a Vec
     pub fn into_vec(&mut self) -> Vec<T> {
-        match self {
-            Self::Inline {
+        match &mut self.0 {
+            QueueInternal::Inline {
                 buf,
                 head,
                 tail,
@@ -213,7 +215,7 @@ impl<T, const N: usize> Queue<T, N> {
                 *len = 0;
                 result
             }
-            Self::Heap(vec) => vec.drain(..).collect(),
+            QueueInternal::Heap(vec) => vec.drain(..).collect(),
         }
     }
 
@@ -221,14 +223,14 @@ impl<T, const N: usize> Queue<T, N> {
     /// Creates an iterator that yields references to elements in FIFO order
     #[inline]
     pub fn iter(&self) -> Iter<'_, T, N> {
-        match self {
-            Self::Inline { buf, head, len, .. } => Iter::Inline {
+        match &self.0 {
+            QueueInternal::Inline { buf, head, len, .. } => Iter::Inline {
                 buf,
                 head: *head,
                 remaining: *len,
                 _phantom: std::marker::PhantomData,
             },
-            Self::Heap(vec) => Iter::Heap(vec.iter()),
+            QueueInternal::Heap(vec) => Iter::Heap(vec.iter()),
         }
     }
 }
@@ -300,9 +302,9 @@ impl<T, const N: usize> Queue<T, N> {
     /// Returns the number of elements in the queue
     #[inline]
     pub fn len(&self) -> usize {
-        match self {
-            Self::Inline { len, .. } => *len,
-            Self::Heap(vec) => vec.len(),
+        match &self.0 {
+            QueueInternal::Inline { len, .. } => *len,
+            QueueInternal::Heap(vec) => vec.len(),
         }
     }
 
@@ -317,8 +319,8 @@ impl<T, const N: usize> Queue<T, N> {
         let current_len = self.len();
         let required_capacity = current_len + additional;
 
-        match self {
-            Self::Inline { buf, head, len, .. } if required_capacity > N => {
+        match &mut self.0 {
+            QueueInternal::Inline { buf, head, len, .. } if required_capacity > N => {
                 // Need to spill to heap
                 let mut heap = VecDeque::with_capacity(required_capacity);
 
@@ -329,12 +331,12 @@ impl<T, const N: usize> Queue<T, N> {
                     idx = if unlikely(idx + 1 == N) { 0 } else { idx + 1 };
                 }
                 *len = 0; // Prevent double-drop
-                *self = Self::Heap(heap);
+                self.0 = QueueInternal::Heap(heap);
             }
-            Self::Inline { .. } => {
+            QueueInternal::Inline { .. } => {
                 // Already have enough capacity inline
             }
-            Self::Heap(vec) => {
+            QueueInternal::Heap(vec) => {
                 vec.reserve(additional);
             }
         }
@@ -344,8 +346,8 @@ impl<T, const N: usize> Queue<T, N> {
     ///
     /// After calling this, the elements can be accessed as a single slice via `as_slices()`
     pub fn make_contiguous(&mut self) -> &mut [T] {
-        match self {
-            Self::Inline {
+        match &mut self.0 {
+            QueueInternal::Inline {
                 buf,
                 head,
                 tail,
@@ -382,14 +384,14 @@ impl<T, const N: usize> Queue<T, N> {
 
                 unsafe { std::slice::from_raw_parts_mut(buf[0].as_mut_ptr(), *len) }
             }
-            Self::Heap(vec) => vec.make_contiguous(),
+            QueueInternal::Heap(vec) => vec.make_contiguous(),
         }
     }
 
     /// Removes all elements from the queue
     pub fn clear(&mut self) {
-        match self {
-            Self::Inline {
+        match &mut self.0 {
+            QueueInternal::Inline {
                 buf,
                 head,
                 len,
@@ -407,7 +409,7 @@ impl<T, const N: usize> Queue<T, N> {
                 *tail = 0;
                 *len = 0;
             }
-            Self::Heap(vec) => vec.clear(),
+            QueueInternal::Heap(vec) => vec.clear(),
         }
     }
 
@@ -425,8 +427,8 @@ impl<T, const N: usize> Queue<T, N> {
             return;
         }
 
-        match self {
-            Self::Inline { buf, head, .. } => {
+        match &mut self.0 {
+            QueueInternal::Inline { buf, head, .. } => {
                 let idx_a = (*head + a) % N;
                 let idx_b = (*head + b) % N;
                 unsafe {
@@ -435,7 +437,7 @@ impl<T, const N: usize> Queue<T, N> {
                     std::ptr::swap(ptr_a, ptr_b);
                 }
             }
-            Self::Heap(vec) => {
+            QueueInternal::Heap(vec) => {
                 vec.swap(a, b);
             }
         }
@@ -444,21 +446,21 @@ impl<T, const N: usize> Queue<T, N> {
     /// Returns a mutable iterator over the queue
     #[inline]
     pub fn iter_mut(&mut self) -> IterMut<'_, T, N> {
-        match self {
-            Self::Inline { buf, head, len, .. } => IterMut::Inline {
+        match &mut self.0 {
+            QueueInternal::Inline { buf, head, len, .. } => IterMut::Inline {
                 buf,
                 head: *head,
                 remaining: *len,
                 _phantom: std::marker::PhantomData,
             },
-            Self::Heap(vec) => IterMut::Heap(vec.iter_mut()),
+            QueueInternal::Heap(vec) => IterMut::Heap(vec.iter_mut()),
         }
     }
 }
 
 impl<T, const N: usize> Drop for Queue<T, N> {
     fn drop(&mut self) {
-        if let Self::Inline { buf, head, len, .. } = self {
+        if let QueueInternal::Inline { buf, head, len, .. } = &mut self.0 {
             let mut idx = *head;
             for _ in 0..*len {
                 unsafe {
@@ -675,7 +677,7 @@ mod tests {
         queue.push_back(3);
 
         // Should still be inline
-        if let Queue::Inline { len, .. } = &queue {
+        if let QueueInternal::Inline { len, .. } = &queue.0 {
             assert_eq!(*len, 3);
         } else {
             panic!("Queue should still be inline");
@@ -693,13 +695,13 @@ mod tests {
         queue.push_back(2);
 
         // Should be inline
-        assert!(matches!(queue, Queue::Inline { .. }));
+        assert!(matches!(queue.0, QueueInternal::Inline { .. }));
 
         // This should spill to heap
         queue.push_back(3);
 
         // Should now be heap
-        assert!(matches!(queue, Queue::Heap(_)));
+        assert!(matches!(queue.0, QueueInternal::Heap(_)));
 
         assert_eq!(queue.pop_front(), Some(1));
         assert_eq!(queue.pop_front(), Some(2));
@@ -850,7 +852,7 @@ mod tests {
         queue.push_back(2);
         queue.push_back(3); // Should spill to heap
 
-        assert!(matches!(queue, Queue::Heap(_)));
+        assert!(matches!(queue.0, QueueInternal::Heap(_)));
         assert_eq!(queue.pop_front(), Some(2));
         assert_eq!(queue.pop_front(), Some(3));
     }
@@ -916,7 +918,7 @@ mod tests {
         // This should compile but immediately spill to heap
         let mut queue: Queue<i32, 0> = Queue::new();
         queue.push_back(1);
-        assert!(matches!(queue, Queue::Heap(_)));
+        assert!(matches!(queue.0, QueueInternal::Heap(_)));
         assert_eq!(queue.pop_front(), Some(1));
     }
 
@@ -1374,11 +1376,11 @@ mod tests {
     fn test_with_capacity() {
         // Small capacity - should create inline
         let queue: Queue<i32, 4> = Queue::with_capacity(3);
-        assert!(matches!(queue, Queue::Inline { .. }));
+        assert!(matches!(queue.0, QueueInternal::Inline { .. }));
 
         // Large capacity - should create heap
         let queue: Queue<i32, 4> = Queue::with_capacity(10);
-        assert!(matches!(queue, Queue::Heap(_)));
+        assert!(matches!(queue.0, QueueInternal::Heap(_)));
     }
 
     #[test]
@@ -1389,11 +1391,11 @@ mod tests {
 
         // Reserve within inline capacity - should stay inline
         queue.reserve(1);
-        assert!(matches!(queue, Queue::Inline { .. }));
+        assert!(matches!(queue.0, QueueInternal::Inline { .. }));
 
         // Reserve beyond inline capacity - should spill to heap
         queue.reserve(5);
-        assert!(matches!(queue, Queue::Heap(_)));
+        assert!(matches!(queue.0, QueueInternal::Heap(_)));
 
         // Check that elements are preserved
         assert_eq!(queue.pop_front(), Some(1));
@@ -1414,7 +1416,7 @@ mod tests {
 
         // Now reserve to force spill
         queue.reserve(3);
-        assert!(matches!(queue, Queue::Heap(_)));
+        assert!(matches!(queue.0, QueueInternal::Heap(_)));
 
         // Verify order is preserved
         assert_eq!(queue.pop_front(), Some(2));
