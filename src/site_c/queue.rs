@@ -64,6 +64,16 @@ impl<T, const N: usize> Queue<T, N> {
         }
     }
 
+    /// Creates a new Queue with space for at least `capacity` elements
+    #[inline]
+    pub fn with_capacity(capacity: usize) -> Self {
+        if capacity <= N {
+            Self::new()
+        } else {
+            Self::Heap(VecDeque::with_capacity(capacity))
+        }
+    }
+
     /// Adds an element to the back of the queue
     #[inline]
     pub fn push_back(&mut self, value: T) {
@@ -301,6 +311,149 @@ impl<T, const N: usize> Queue<T, N> {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// Reserves capacity for at least `additional` more elements to be inserted
+    pub fn reserve(&mut self, additional: usize) {
+        let current_len = self.len();
+        let required_capacity = current_len + additional;
+
+        match self {
+            Self::Inline { buf, head, len, .. } if required_capacity > N => {
+                // Need to spill to heap
+                let mut heap = VecDeque::with_capacity(required_capacity);
+
+                let mut idx = *head;
+                for _ in 0..*len {
+                    let val = unsafe { buf[idx].assume_init_read() };
+                    heap.push_back(val);
+                    idx = if unlikely(idx + 1 == N) { 0 } else { idx + 1 };
+                }
+                *len = 0; // Prevent double-drop
+                *self = Self::Heap(heap);
+            }
+            Self::Inline { .. } => {
+                // Already have enough capacity inline
+            }
+            Self::Heap(vec) => {
+                vec.reserve(additional);
+            }
+        }
+    }
+
+    /// Makes the elements of the queue contiguous in memory
+    ///
+    /// After calling this, the elements can be accessed as a single slice via `as_slices()`
+    pub fn make_contiguous(&mut self) -> &mut [T] {
+        match self {
+            Self::Inline {
+                buf,
+                head,
+                tail,
+                len,
+            } => {
+                if unlikely(*len == 0) {
+                    return &mut [];
+                }
+
+                // If already contiguous, nothing to do
+                if *head < *tail || (*head == *tail && *len == 0) {
+                    let slice =
+                        unsafe { std::slice::from_raw_parts_mut(buf[*head].as_mut_ptr(), *len) };
+                    return slice;
+                }
+
+                // Need to rotate elements to make them contiguous
+                // Move elements to start from index 0
+                let mut temp = Vec::with_capacity(*len);
+                let mut idx = *head;
+                for _ in 0..*len {
+                    let val = unsafe { buf[idx].assume_init_read() };
+                    temp.push(val);
+                    idx = if unlikely(idx + 1 == N) { 0 } else { idx + 1 };
+                }
+
+                // Write back starting from index 0
+                for (i, val) in temp.into_iter().enumerate() {
+                    buf[i] = MaybeUninit::new(val);
+                }
+
+                *head = 0;
+                *tail = *len;
+
+                unsafe { std::slice::from_raw_parts_mut(buf[0].as_mut_ptr(), *len) }
+            }
+            Self::Heap(vec) => vec.make_contiguous(),
+        }
+    }
+
+    /// Removes all elements from the queue
+    pub fn clear(&mut self) {
+        match self {
+            Self::Inline {
+                buf,
+                head,
+                len,
+                tail,
+            } => {
+                // Drop all elements
+                let mut idx = *head;
+                for _ in 0..*len {
+                    unsafe {
+                        buf[idx].assume_init_drop();
+                    }
+                    idx = if unlikely(idx + 1 == N) { 0 } else { idx + 1 };
+                }
+                *head = 0;
+                *tail = 0;
+                *len = 0;
+            }
+            Self::Heap(vec) => vec.clear(),
+        }
+    }
+
+    /// Swaps elements at indices `a` and `b`
+    ///
+    /// # Panics
+    ///
+    /// Panics if either index is out of bounds
+    pub fn swap(&mut self, a: usize, b: usize) {
+        let len = self.len();
+        assert!(a < len, "index {} out of bounds (len: {})", a, len);
+        assert!(b < len, "index {} out of bounds (len: {})", b, len);
+
+        if unlikely(a == b) {
+            return;
+        }
+
+        match self {
+            Self::Inline { buf, head, .. } => {
+                let idx_a = (*head + a) % N;
+                let idx_b = (*head + b) % N;
+                unsafe {
+                    let ptr_a = buf[idx_a].as_mut_ptr();
+                    let ptr_b = buf[idx_b].as_mut_ptr();
+                    std::ptr::swap(ptr_a, ptr_b);
+                }
+            }
+            Self::Heap(vec) => {
+                vec.swap(a, b);
+            }
+        }
+    }
+
+    /// Returns a mutable iterator over the queue
+    #[inline]
+    pub fn iter_mut(&mut self) -> IterMut<'_, T, N> {
+        match self {
+            Self::Inline { buf, head, len, .. } => IterMut::Inline {
+                buf,
+                head: *head,
+                remaining: *len,
+                _phantom: std::marker::PhantomData,
+            },
+            Self::Heap(vec) => IterMut::Heap(vec.iter_mut()),
+        }
+    }
 }
 
 impl<T, const N: usize> Drop for Queue<T, N> {
@@ -410,6 +563,75 @@ impl<'a, T, const N: usize> IntoIterator for &'a Queue<T, N> {
 
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
+    }
+}
+
+/// Mutable iterator over elements in the queue
+pub enum IterMut<'a, T, const N: usize> {
+    Inline {
+        buf: &'a mut [MaybeUninit<T>; N],
+        head: usize,
+        remaining: usize,
+        _phantom: std::marker::PhantomData<&'a mut T>,
+    },
+    Heap(std::collections::vec_deque::IterMut<'a, T>),
+}
+
+impl<'a, T, const N: usize> Iterator for IterMut<'a, T, N> {
+    type Item = &'a mut T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Inline {
+                buf,
+                head,
+                remaining,
+                ..
+            } => {
+                if unlikely(*remaining == 0) {
+                    None
+                } else {
+                    let idx = *head;
+                    *head = if unlikely(*head + 1 == N) {
+                        0
+                    } else {
+                        *head + 1
+                    };
+                    *remaining -= 1;
+
+                    // SAFETY: We maintain the invariant that elements from head
+                    // for 'remaining' count are initialized
+                    unsafe {
+                        let ptr = buf[idx].as_mut_ptr();
+                        Some(&mut *ptr)
+                    }
+                }
+            }
+            Self::Heap(iter) => iter.next(),
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let len = self.len();
+        (len, Some(len))
+    }
+}
+
+impl<'a, T, const N: usize> ExactSizeIterator for IterMut<'a, T, N> {
+    fn len(&self) -> usize {
+        match self {
+            Self::Inline { remaining, .. } => *remaining,
+            Self::Heap(iter) => iter.len(),
+        }
+    }
+}
+
+impl<'a, T, const N: usize> IntoIterator for &'a mut Queue<T, N> {
+    type Item = &'a mut T;
+    type IntoIter = IterMut<'a, T, N>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter_mut()
     }
 }
 
@@ -1146,5 +1368,275 @@ mod tests {
         assert_eq!(queue.pop_back(), Some(5));
         assert_eq!(queue.pop_front(), Some(4));
         assert_eq!(queue.len(), 3);
+    }
+
+    #[test]
+    fn test_with_capacity() {
+        // Small capacity - should create inline
+        let queue: Queue<i32, 4> = Queue::with_capacity(3);
+        assert!(matches!(queue, Queue::Inline { .. }));
+
+        // Large capacity - should create heap
+        let queue: Queue<i32, 4> = Queue::with_capacity(10);
+        assert!(matches!(queue, Queue::Heap(_)));
+    }
+
+    #[test]
+    fn test_reserve() {
+        let mut queue: Queue<i32, 4> = Queue::new();
+        queue.push_back(1);
+        queue.push_back(2);
+
+        // Reserve within inline capacity - should stay inline
+        queue.reserve(1);
+        assert!(matches!(queue, Queue::Inline { .. }));
+
+        // Reserve beyond inline capacity - should spill to heap
+        queue.reserve(5);
+        assert!(matches!(queue, Queue::Heap(_)));
+
+        // Check that elements are preserved
+        assert_eq!(queue.pop_front(), Some(1));
+        assert_eq!(queue.pop_front(), Some(2));
+    }
+
+    #[test]
+    fn test_reserve_with_wraparound() {
+        let mut queue: Queue<i32, 4> = Queue::new();
+
+        // Create wraparound scenario
+        queue.push_back(1);
+        queue.push_back(2);
+        queue.push_back(3);
+        queue.pop_front();
+        queue.push_back(4);
+        queue.push_back(5);
+
+        // Now reserve to force spill
+        queue.reserve(3);
+        assert!(matches!(queue, Queue::Heap(_)));
+
+        // Verify order is preserved
+        assert_eq!(queue.pop_front(), Some(2));
+        assert_eq!(queue.pop_front(), Some(3));
+        assert_eq!(queue.pop_front(), Some(4));
+        assert_eq!(queue.pop_front(), Some(5));
+    }
+
+    #[test]
+    fn test_make_contiguous_inline() {
+        let mut queue: Queue<i32, 6> = Queue::new();
+
+        // Test empty queue
+        let slice = queue.make_contiguous();
+        assert_eq!(slice, &[]);
+
+        // Test contiguous elements
+        queue.push_back(1);
+        queue.push_back(2);
+        queue.push_back(3);
+        let slice = queue.make_contiguous();
+        assert_eq!(slice, &[1, 2, 3]);
+
+        // Test with wraparound
+        let mut queue: Queue<i32, 4> = Queue::new();
+        queue.push_back(1);
+        queue.push_back(2);
+        queue.push_back(3);
+        queue.pop_front();
+        queue.push_back(4);
+        queue.push_back(5);
+
+        let slice = queue.make_contiguous();
+        assert_eq!(slice, &[2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn test_make_contiguous_heap() {
+        let mut queue: Queue<i32, 2> = Queue::new();
+        queue.push_back(1);
+        queue.push_back(2);
+        queue.push_back(3); // Spills to heap
+
+        let slice = queue.make_contiguous();
+        assert_eq!(slice, &[1, 2, 3]);
+    }
+
+    #[test]
+    fn test_clear() {
+        let mut queue: Queue<i32, 4> = Queue::new();
+        queue.push_back(1);
+        queue.push_back(2);
+        queue.push_back(3);
+
+        queue.clear();
+        assert_eq!(queue.len(), 0);
+        assert!(queue.is_empty());
+        assert_eq!(queue.pop_front(), None);
+
+        // Can use after clear
+        queue.push_back(4);
+        assert_eq!(queue.pop_front(), Some(4));
+    }
+
+    #[test]
+    fn test_clear_heap() {
+        let mut queue: Queue<i32, 2> = Queue::new();
+        queue.push_back(1);
+        queue.push_back(2);
+        queue.push_back(3); // Spills to heap
+
+        queue.clear();
+        assert_eq!(queue.len(), 0);
+        assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn test_clear_with_wraparound() {
+        let mut queue: Queue<String, 4> = Queue::new();
+        queue.push_back("a".to_string());
+        queue.push_back("b".to_string());
+        queue.pop_front();
+        queue.push_back("c".to_string());
+        queue.push_back("d".to_string());
+
+        queue.clear();
+        assert_eq!(queue.len(), 0);
+        assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn test_swap() {
+        let mut queue: Queue<i32, 5> = Queue::new();
+        queue.push_back(10);
+        queue.push_back(20);
+        queue.push_back(30);
+        queue.push_back(40);
+
+        // Swap first and last elements
+        queue.swap(0, 3);
+        let vec: Vec<_> = queue.iter().copied().collect();
+        assert_eq!(vec, vec![40, 20, 30, 10]);
+
+        // Swap middle elements
+        queue.swap(1, 2);
+        let vec: Vec<_> = queue.iter().copied().collect();
+        assert_eq!(vec, vec![40, 30, 20, 10]);
+    }
+
+    #[test]
+    fn test_swap_with_wraparound() {
+        let mut queue: Queue<i32, 4> = Queue::new();
+        queue.push_back(1);
+        queue.push_back(2);
+        queue.push_back(3);
+        queue.pop_front();
+        queue.push_back(4);
+        queue.push_back(5);
+
+        // Queue is now [2, 3, 4, 5] with wraparound
+        queue.swap(0, 3);
+        let vec: Vec<_> = queue.iter().copied().collect();
+        assert_eq!(vec, vec![5, 3, 4, 2]);
+    }
+
+    #[test]
+    fn test_swap_heap() {
+        let mut queue: Queue<i32, 2> = Queue::new();
+        queue.push_back(1);
+        queue.push_back(2);
+        queue.push_back(3);
+        queue.push_back(4);
+
+        queue.swap(0, 3);
+        assert_eq!(queue.pop_front(), Some(4));
+    }
+
+    #[test]
+    fn test_swap_same_index() {
+        let mut queue: Queue<i32, 4> = Queue::new();
+        queue.push_back(1);
+        queue.push_back(2);
+
+        queue.swap(1, 1);
+        let vec: Vec<_> = queue.iter().copied().collect();
+        assert_eq!(vec, vec![1, 2]);
+    }
+
+    #[test]
+    #[should_panic(expected = "out of bounds")]
+    fn test_swap_out_of_bounds() {
+        let mut queue: Queue<i32, 4> = Queue::new();
+        queue.push_back(1);
+        queue.push_back(2);
+
+        queue.swap(0, 5);
+    }
+
+    #[test]
+    fn test_iter_mut() {
+        let mut queue: Queue<i32, 4> = Queue::new();
+        queue.push_back(1);
+        queue.push_back(2);
+        queue.push_back(3);
+
+        // Modify all elements
+        for val in &mut queue {
+            *val *= 2;
+        }
+
+        let vec: Vec<_> = queue.iter().copied().collect();
+        assert_eq!(vec, vec![2, 4, 6]);
+    }
+
+    #[test]
+    fn test_iter_mut_with_wraparound() {
+        let mut queue: Queue<i32, 4> = Queue::new();
+        queue.push_back(1);
+        queue.push_back(2);
+        queue.push_back(3);
+        queue.pop_front();
+        queue.push_back(4);
+        queue.push_back(5);
+
+        // Add 10 to each element
+        for val in &mut queue {
+            *val += 10;
+        }
+
+        let vec: Vec<_> = queue.iter().copied().collect();
+        assert_eq!(vec, vec![12, 13, 14, 15]);
+    }
+
+    #[test]
+    fn test_iter_mut_heap() {
+        let mut queue: Queue<i32, 2> = Queue::new();
+        queue.push_back(1);
+        queue.push_back(2);
+        queue.push_back(3);
+
+        for val in &mut queue {
+            *val *= 3;
+        }
+
+        assert_eq!(queue.pop_front(), Some(3));
+        assert_eq!(queue.pop_front(), Some(6));
+        assert_eq!(queue.pop_front(), Some(9));
+    }
+
+    #[test]
+    fn test_iter_mut_size_hint() {
+        let mut queue: Queue<i32, 4> = Queue::new();
+        queue.push_back(1);
+        queue.push_back(2);
+        queue.push_back(3);
+
+        let mut iter = queue.iter_mut();
+        assert_eq!(iter.size_hint(), (3, Some(3)));
+        assert_eq!(iter.len(), 3);
+
+        iter.next();
+        assert_eq!(iter.size_hint(), (2, Some(2)));
+        assert_eq!(iter.len(), 2);
     }
 }
