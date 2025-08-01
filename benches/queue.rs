@@ -204,7 +204,7 @@ fn bench_queue_ops(c: &mut Criterion) {
                 for i in 0..3 {
                     queue.push_back(i as i32);
                 }
-                black_box(queue.take_all())
+                black_box(queue.into_vec())
             })
         });
 
@@ -215,7 +215,7 @@ fn bench_queue_ops(c: &mut Criterion) {
                 for i in 0..8 {
                     queue.push_back(i as i32);
                 }
-                black_box(queue.take_all())
+                black_box(queue.into_vec())
             })
         });
 
@@ -232,7 +232,7 @@ fn bench_queue_ops(c: &mut Criterion) {
                 for i in 0..7 {
                     queue.push_back(i as i32);
                 }
-                black_box(queue.take_all())
+                black_box(queue.into_vec())
             })
         });
 
@@ -243,7 +243,7 @@ fn bench_queue_ops(c: &mut Criterion) {
                 for i in 0..12 {
                     queue.push_back(i as i32);
                 }
-                black_box(queue.take_all())
+                black_box(queue.into_vec())
             })
         });
 
@@ -547,7 +547,7 @@ fn bench_realistic_usage(c: &mut Criterion) {
             }
 
             // Take all remaining
-            black_box(queue.take_all())
+            black_box(queue.into_vec())
         })
     });
 

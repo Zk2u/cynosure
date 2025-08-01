@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{rc::Rc, time::Duration};
 
 use cynosure::site_c::cell::*;
 
@@ -6,13 +6,13 @@ use cynosure::site_c::cell::*;
 async fn test_rate_limiter_pattern() {
     // Rate limiter with shared state
     struct RateLimiter {
-        count: LocalCell<u32>,
-        last_reset: LocalCell<std::time::Instant>,
+        count: ScopedCell<u32>,
+        last_reset: ScopedCell<std::time::Instant>,
     }
 
     let limiter = RateLimiter {
-        count: LocalCell::new(0),
-        last_reset: LocalCell::new(std::time::Instant::now()),
+        count: ScopedCell::new(0),
+        last_reset: ScopedCell::new(std::time::Instant::now()),
     };
 
     // Simulate requests
@@ -52,7 +52,7 @@ async fn test_connection_pool_pattern() {
         in_use: bool,
     }
 
-    let pool = LocalCell::new(vec![
+    let pool = ScopedCell::new(vec![
         Connection {
             id: 0,
             in_use: false,
@@ -106,7 +106,7 @@ async fn test_accumulator_across_tasks() {
         max: Option<i64>,
     }
 
-    let stats = LocalCell::new(Stats {
+    let stats = ScopedCell::rc(Stats {
         total: 0,
         count: 0,
         min: None,
@@ -150,13 +150,13 @@ async fn test_event_bus_pattern() {
     type Handler = Box<dyn Fn(&str)>;
 
     struct EventBus {
-        handlers: LocalCell<Vec<Handler>>,
-        events: LocalCell<Vec<String>>,
+        handlers: ScopedCell<Vec<Handler>>,
+        events: Rc<ScopedCell<Vec<String>>>,
     }
 
     let bus = EventBus {
-        handlers: LocalCell::new(Vec::new()),
-        events: LocalCell::new(Vec::new()),
+        handlers: ScopedCell::new(Vec::new()),
+        events: ScopedCell::rc(Vec::new()),
     };
 
     // Register handlers
@@ -196,17 +196,17 @@ async fn test_recursive_data_structure() {
     // Tree-like structure with shared nodes
     struct Node {
         value: i32,
-        children: Vec<LocalCell<Node>>,
+        children: Vec<ScopedCell<Node>>,
     }
 
-    let root = LocalCell::new(Node {
+    let root = ScopedCell::new(Node {
         value: 1,
         children: vec![
-            LocalCell::new(Node {
+            ScopedCell::new(Node {
                 value: 2,
                 children: vec![],
             }),
-            LocalCell::new(Node {
+            ScopedCell::new(Node {
                 value: 3,
                 children: vec![],
             }),
@@ -214,7 +214,7 @@ async fn test_recursive_data_structure() {
     });
 
     // Traverse and sum values
-    fn sum_tree(node: &LocalCell<Node>) -> i32 {
+    fn sum_tree(node: &ScopedCell<Node>) -> i32 {
         node.with(|n| n.value + n.children.iter().map(sum_tree).sum::<i32>())
     }
 
@@ -237,7 +237,7 @@ async fn test_cached_computation() {
         computation_in_progress: bool,
     }
 
-    let cache = LocalCell::new(Cache::<String> {
+    let cache = ScopedCell::rc(Cache::<String> {
         value: None,
         computation_in_progress: false,
     });
@@ -289,7 +289,7 @@ async fn test_cached_computation() {
 
 #[monoio::test]
 async fn test_no_await_enforcement() {
-    let data = LocalCell::new(vec![1, 2, 3]);
+    let data = ScopedCell::new(vec![1, 2, 3]);
 
     // This compiles and works
     data.with_mut(|v| {

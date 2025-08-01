@@ -1,27 +1,27 @@
 use std::{cell::RefCell, rc::Rc};
 
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use cynosure::site_c::cell::LocalCell;
+use cynosure::site_c::cell::ScopedCell;
 
 // Benchmark basic operations
-fn bench_localcell_ops(c: &mut Criterion) {
+fn bench_scopedcell_ops(c: &mut Criterion) {
     // Creation benchmarks
-    let mut group = c.benchmark_group("LocalCell Creation");
-    group.bench_function("new_i32", |b| b.iter(|| LocalCell::new(black_box(42))));
+    let mut group = c.benchmark_group("ScopedCell Creation");
+    group.bench_function("new_i32", |b| b.iter(|| ScopedCell::new(black_box(42))));
     group.bench_function("new_vec", |b| {
-        b.iter(|| LocalCell::new(black_box(vec![1, 2, 3, 4, 5])))
+        b.iter(|| ScopedCell::new(black_box(vec![1, 2, 3, 4, 5])))
     });
     group.bench_function("new_string", |b| {
-        b.iter(|| LocalCell::new(black_box(String::from("hello world"))))
+        b.iter(|| ScopedCell::new(black_box(String::from("hello world"))))
     });
     group.finish();
 
     // Access benchmarks
-    let cell_i32 = LocalCell::new(42);
-    let cell_vec = LocalCell::new(vec![1, 2, 3, 4, 5]);
-    let cell_string = LocalCell::new(String::from("hello world"));
+    let cell_i32 = ScopedCell::new(42);
+    let cell_vec = ScopedCell::new(vec![1, 2, 3, 4, 5]);
+    let cell_string = ScopedCell::new(String::from("hello world"));
 
-    let mut group = c.benchmark_group("LocalCell Access");
+    let mut group = c.benchmark_group("ScopedCell Access");
     group.bench_function("with_i32", |b| {
         b.iter(|| {
             cell_i32.with(|x| {
@@ -46,11 +46,11 @@ fn bench_localcell_ops(c: &mut Criterion) {
     group.finish();
 
     // Mutation benchmarks
-    let cell_i32 = LocalCell::new(42);
-    let cell_vec = LocalCell::new(vec![1, 2, 3, 4, 5]);
-    let cell_string = LocalCell::new(String::from("hello world"));
+    let cell_i32 = ScopedCell::new(42);
+    let cell_vec = ScopedCell::new(vec![1, 2, 3, 4, 5]);
+    let cell_string = ScopedCell::new(String::from("hello world"));
 
-    let mut group = c.benchmark_group("LocalCell Mutation");
+    let mut group = c.benchmark_group("ScopedCell Mutation");
     group.bench_function("with_mut_i32", |b| {
         b.iter(|| {
             cell_i32.with_mut(|x| {
@@ -91,11 +91,11 @@ fn bench_localcell_ops(c: &mut Criterion) {
     group.finish();
 
     // Clone benchmarks
-    let cell_i32 = LocalCell::new(42);
-    let cell_vec = LocalCell::new(vec![1, 2, 3, 4, 5]);
-    let cell_string = LocalCell::new(String::from("hello world"));
+    let cell_i32 = ScopedCell::rc(42);
+    let cell_vec = ScopedCell::rc(vec![1, 2, 3, 4, 5]);
+    let cell_string = ScopedCell::rc(String::from("hello world"));
 
-    let mut group = c.benchmark_group("LocalCell Clone");
+    let mut group = c.benchmark_group("ScopedCell Clone");
     group.bench_function("clone_i32", |b| b.iter(|| black_box(cell_i32.clone())));
     group.bench_function("clone_vec", |b| b.iter(|| black_box(cell_vec.clone())));
     group.bench_function("clone_string", |b| {
@@ -104,25 +104,25 @@ fn bench_localcell_ops(c: &mut Criterion) {
     group.finish();
 }
 
-// Comparison with Rc<RefCell<T>>
+// Comparison with RefCell<T>
 fn bench_comparison(c: &mut Criterion) {
-    let mut group = c.benchmark_group("LocalCell vs Rc<RefCell>");
+    let mut group = c.benchmark_group("ScopedCell vs RefCell");
 
     // Creation
-    group.bench_function("LocalCell::new(i32)", |b| {
-        b.iter(|| LocalCell::new(black_box(42)))
+    group.bench_function("ScopedCell::new(i32)", |b| {
+        b.iter(|| ScopedCell::new(black_box(42)))
     });
-    group.bench_function("Rc::new(RefCell::new(i32))", |b| {
-        b.iter(|| Rc::new(RefCell::new(black_box(42))))
+    group.bench_function("RefCell::new(i32)", |b| {
+        b.iter(|| RefCell::new(black_box(42)))
     });
 
     // Immutable access
-    let localcell = LocalCell::new(42);
-    let refcell = Rc::new(RefCell::new(42));
+    let scopedcell = ScopedCell::new(42);
+    let refcell = RefCell::new(42);
 
-    group.bench_function("LocalCell::with", |b| {
+    group.bench_function("ScopedCell::with", |b| {
         b.iter(|| {
-            localcell.with(|x| {
+            scopedcell.with(|x| {
                 black_box(*x);
             })
         })
@@ -134,12 +134,12 @@ fn bench_comparison(c: &mut Criterion) {
     });
 
     // Mutable access
-    let localcell = LocalCell::new(42);
-    let refcell = Rc::new(RefCell::new(42));
+    let scopedcell = ScopedCell::new(42);
+    let refcell = RefCell::new(42);
 
-    group.bench_function("LocalCell::with_mut", |b| {
+    group.bench_function("ScopedCell::with_mut", |b| {
         b.iter(|| {
-            localcell.with_mut(|x| {
+            scopedcell.with_mut(|x| {
                 *x = black_box(*x + 1);
             })
         })
@@ -151,15 +151,6 @@ fn bench_comparison(c: &mut Criterion) {
         })
     });
 
-    // Clone
-    let localcell = LocalCell::new(42);
-    let refcell = Rc::new(RefCell::new(42));
-
-    group.bench_function("LocalCell::clone", |b| {
-        b.iter(|| black_box(localcell.clone()))
-    });
-    group.bench_function("Rc::clone", |b| b.iter(|| black_box(Rc::clone(&refcell))));
-
     group.finish();
 }
 
@@ -169,9 +160,9 @@ fn bench_realistic_usage(c: &mut Criterion) {
     let mut group = c.benchmark_group("Realistic Usage");
 
     // Simple counter incrementing
-    group.bench_function("LocalCell counter", |b| {
+    group.bench_function("ScopedCell counter", |b| {
         b.iter(|| {
-            let counter = LocalCell::new(0);
+            let counter = ScopedCell::rc(0);
             let counter2 = counter.clone();
 
             for _ in 0..100 {
@@ -204,9 +195,9 @@ fn bench_realistic_usage(c: &mut Criterion) {
     });
 
     // Simulating multiple readers and occasional writer
-    group.bench_function("LocalCell readers+writer", |b| {
+    group.bench_function("ScopedCell readers+writer", |b| {
         b.iter(|| {
-            let data = LocalCell::new(vec![1, 2, 3, 4, 5]);
+            let data = ScopedCell::rc(vec![1, 2, 3, 4, 5]);
             let data2 = data.clone();
             let data3 = data.clone();
 
@@ -254,7 +245,7 @@ fn bench_realistic_usage(c: &mut Criterion) {
 // Define the benchmark group
 criterion_group!(
     benches,
-    bench_localcell_ops,
+    bench_scopedcell_ops,
     bench_comparison,
     bench_realistic_usage,
 );

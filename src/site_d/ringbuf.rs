@@ -21,7 +21,8 @@ use std::{
     task::{Context, Poll, Waker},
 };
 
-use crate::{CachePadded, blocking::block_on};
+use super::padding::CachePadded;
+use crate::blocking::block_on;
 
 /// Shared ring buffer state
 struct RingBufferShared<T> {
@@ -55,8 +56,8 @@ impl<T> Drop for RingBufferShared<T> {
     fn drop(&mut self) {
         unsafe {
             // Drop any remaining items
-            let write = self.write_index.value.load(Ordering::Acquire);
-            let read = self.read_index.value.load(Ordering::Acquire);
+            let write = self.write_index.load(Ordering::Acquire);
+            let read = self.read_index.load(Ordering::Acquire);
 
             let mut current = read;
             while current != write {
@@ -155,7 +156,7 @@ impl<T> Producer<T> {
         // Check if buffer appears full based on cached indices
         if write.wrapping_sub(read) >= self.shared.capacity {
             // Update cached read index and check again
-            self.cached_read = self.shared.read_index.value.load(Ordering::Acquire);
+            self.cached_read = self.shared.read_index.load(Ordering::Acquire);
 
             if write.wrapping_sub(self.cached_read) >= self.shared.capacity {
                 return Err(value);
@@ -174,7 +175,6 @@ impl<T> Producer<T> {
         // Publish the write
         self.shared
             .write_index
-            .value
             .store(self.cached_write, Ordering::Release);
 
         // Wake consumer if waiting
@@ -222,7 +222,7 @@ impl<T> Producer<T> {
 
         if available == 0 {
             // Update cached read index and check again
-            self.cached_read = self.shared.read_index.value.load(Ordering::Acquire);
+            self.cached_read = self.shared.read_index.load(Ordering::Acquire);
             available = self
                 .shared
                 .capacity
@@ -263,7 +263,6 @@ impl<T> Producer<T> {
         // Publish the writes with a single atomic store
         self.shared
             .write_index
-            .value
             .store(self.cached_write, Ordering::Release);
 
         // Wake consumer once if needed
@@ -302,7 +301,7 @@ impl<T> Producer<T> {
 
     /// Get the number of items that can be pushed without blocking
     pub fn free_count(&mut self) -> usize {
-        self.cached_read = self.shared.read_index.value.load(Ordering::Acquire);
+        self.cached_read = self.shared.read_index.load(Ordering::Acquire);
         let write = self.cached_write;
         let read = self.cached_read;
 
@@ -311,7 +310,7 @@ impl<T> Producer<T> {
 
     /// Check if the buffer is empty from the producer's perspective
     pub fn is_empty(&mut self) -> bool {
-        self.cached_read = self.shared.read_index.value.load(Ordering::Acquire);
+        self.cached_read = self.shared.read_index.load(Ordering::Acquire);
         self.cached_write == self.cached_read
     }
 
@@ -337,7 +336,7 @@ impl<T> Producer<T> {
     fn wake_consumer(&self) {
         if self.shared.consumer_waker_set.swap(false, Ordering::AcqRel) {
             unsafe {
-                if let Some(waker) = (*self.shared.consumer_waker.value.get()).take() {
+                if let Some(waker) = (*self.shared.consumer_waker.get()).take() {
                     waker.wake();
                 }
             }
@@ -394,7 +393,7 @@ impl<T> Consumer<T> {
         // Check if buffer appears empty based on cached indices
         if read == write {
             // Update cached write index and check again
-            self.cached_write = self.shared.write_index.value.load(Ordering::Acquire);
+            self.cached_write = self.shared.write_index.load(Ordering::Acquire);
 
             if read == self.cached_write {
                 return None;
@@ -413,7 +412,6 @@ impl<T> Consumer<T> {
         // Publish the read
         self.shared
             .read_index
-            .value
             .store(self.cached_read, Ordering::Release);
 
         // Wake producer if waiting
@@ -453,7 +451,7 @@ impl<T> Consumer<T> {
 
         if available == 0 {
             // Update cached write index and check again
-            self.cached_write = self.shared.write_index.value.load(Ordering::Acquire);
+            self.cached_write = self.shared.write_index.load(Ordering::Acquire);
             available = self.cached_write.wrapping_sub(read);
 
             if available == 0 {
@@ -491,7 +489,6 @@ impl<T> Consumer<T> {
         // Publish the reads with a single atomic store
         self.shared
             .read_index
-            .value
             .store(self.cached_read, Ordering::Release);
 
         // Wake producer once if needed
@@ -530,7 +527,7 @@ impl<T> Consumer<T> {
 
     /// Get the number of items available to pop
     pub fn available_count(&mut self) -> usize {
-        self.cached_write = self.shared.write_index.value.load(Ordering::Acquire);
+        self.cached_write = self.shared.write_index.load(Ordering::Acquire);
         let write = self.cached_write;
         let read = self.cached_read;
 
@@ -544,7 +541,7 @@ impl<T> Consumer<T> {
 
     /// Check if the buffer is full from the consumer's perspective
     pub fn is_full(&mut self) -> bool {
-        self.cached_write = self.shared.write_index.value.load(Ordering::Acquire);
+        self.cached_write = self.shared.write_index.load(Ordering::Acquire);
         let write = self.cached_write;
         let read = self.cached_read;
 
@@ -568,7 +565,7 @@ impl<T> Consumer<T> {
     fn wake_producer(&self) {
         if self.shared.producer_waker_set.swap(false, Ordering::AcqRel) {
             unsafe {
-                if let Some(waker) = (*self.shared.producer_waker.value.get()).take() {
+                if let Some(waker) = (*self.shared.producer_waker.get()).take() {
                     waker.wake();
                 }
             }
@@ -621,7 +618,7 @@ impl<'a, T> std::future::Future for PushFuture<'a, T> {
             Err(v) => {
                 // Store waker for later wake-up
                 unsafe {
-                    *this.producer.shared.producer_waker.value.get() = Some(cx.waker().clone());
+                    *this.producer.shared.producer_waker.get() = Some(cx.waker().clone());
                 }
                 this.producer
                     .shared
@@ -654,7 +651,7 @@ impl<'a, T> std::future::Future for PopFuture<'a, T> {
             None => {
                 // Store waker for later wake-up
                 unsafe {
-                    *this.consumer.shared.consumer_waker.value.get() = Some(cx.waker().clone());
+                    *this.consumer.shared.consumer_waker.get() = Some(cx.waker().clone());
                 }
                 this.consumer
                     .shared
@@ -695,7 +692,7 @@ impl<'a, T: Copy> std::future::Future for PushSliceFuture<'a, T> {
 
         // Register waker for when space becomes available
         unsafe {
-            *this.producer.shared.producer_waker.value.get() = Some(cx.waker().clone());
+            *this.producer.shared.producer_waker.get() = Some(cx.waker().clone());
         }
         this.producer
             .shared
@@ -734,7 +731,7 @@ impl<'a, T: Copy> std::future::Future for PopSliceFuture<'a, T> {
 
         // Register waker for when data becomes available
         unsafe {
-            *this.consumer.shared.consumer_waker.value.get() = Some(cx.waker().clone());
+            *this.consumer.shared.consumer_waker.get() = Some(cx.waker().clone());
         }
         this.consumer
             .shared

@@ -2,10 +2,13 @@ use std::{
     future::Future,
     ops::{Deref, DerefMut},
     pin::Pin,
+    rc::Rc,
     task::{Context, Poll, Waker},
 };
 
-use super::{cell::LocalCell, queue::Queue};
+use crate::hints::likely;
+
+use super::{cell::ScopedCell, queue::Queue};
 
 /// A mutual exclusion primitive for single-threaded async executors.
 ///
@@ -13,24 +16,25 @@ use super::{cell::LocalCell, queue::Queue};
 /// being woken when the lock becomes available.
 #[derive(Clone)]
 pub struct LocalMutex<T> {
-    state: LocalCell<MutexState<T>>,
+    state: Rc<ScopedCell<MutexState<T>>>,
 }
 
 struct MutexState<T, const QUEUE_STACK_SIZE: usize = 8> {
     locked: bool,
-    value: T,
     waiters: Queue<Waker, QUEUE_STACK_SIZE>,
+    value: T,
 }
 
 impl<T> LocalMutex<T> {
     /// Creates a new mutex in an unlocked state.
     pub fn new(value: T) -> Self {
         Self {
-            state: LocalCell::new(MutexState {
+            state: ScopedCell::new(MutexState {
                 locked: false,
+                waiters: Queue::new(),
                 value,
-                waiters: Default::default(),
-            }),
+            })
+            .into(),
         }
     }
 
@@ -47,7 +51,7 @@ impl<T> LocalMutex<T> {
     /// Returns `Some(guard)` if successful, `None` if already locked.
     pub fn try_lock(&self) -> Option<LocalMutexGuard<'_, T>> {
         self.state.with_mut(|state| {
-            if !state.locked {
+            if likely(!state.locked) {
                 state.locked = true;
                 Some(LocalMutexGuard { mutex: self })
             } else {
@@ -84,7 +88,7 @@ impl<'a, T> Future for LocalMutexLockFuture<'a, T> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         self.mutex.state.with_mut(|state| {
-            if !state.locked {
+            if likely(!state.locked) {
                 // Acquire the lock
                 state.locked = true;
                 Poll::Ready(LocalMutexGuard { mutex: self.mutex })

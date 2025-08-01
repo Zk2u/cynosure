@@ -1,5 +1,7 @@
 use std::{collections::VecDeque, mem::MaybeUninit};
 
+use crate::hints::{likely, unlikely};
+
 /// A double-ended queue implemented with a growable ring buffer that stores up
 /// to N items inline before spilling to heap
 ///
@@ -63,19 +65,23 @@ impl<T, const N: usize> Queue<T, N> {
                 tail,
                 len,
             } => {
-                if *len < N {
+                if likely(*len < N) {
                     buf[*tail] = MaybeUninit::new(value);
-                    *tail = if *tail + 1 == N { 0 } else { *tail + 1 };
+                    *tail = if unlikely(*tail + 1 == N) {
+                        0
+                    } else {
+                        *tail + 1
+                    };
                     *len += 1;
                 } else {
                     // Spill to heap - move elements in order from circular buffer
-                    let mut heap = VecDeque::with_capacity((N * 2).max(8));
+                    let mut heap = VecDeque::with_capacity(N * 2);
 
                     let mut idx = *head;
                     for _ in 0..*len {
                         let val = unsafe { buf[idx].assume_init_read() };
                         heap.push_back(val);
-                        idx = if idx + 1 == N { 0 } else { idx + 1 };
+                        idx = if unlikely(idx + 1 == N) { 0 } else { idx + 1 };
                     }
                     heap.push_back(value);
                     *len = 0; // Prevent double-drop when Self::Inline is dropped
@@ -91,11 +97,15 @@ impl<T, const N: usize> Queue<T, N> {
     pub fn pop_front(&mut self) -> Option<T> {
         match self {
             Self::Inline { buf, head, len, .. } => {
-                if *len == 0 {
+                if unlikely(*len == 0) {
                     None
                 } else {
                     let value = unsafe { buf[*head].assume_init_read() };
-                    *head = if *head + 1 == N { 0 } else { *head + 1 };
+                    *head = if unlikely(*head + 1 == N) {
+                        0
+                    } else {
+                        *head + 1
+                    };
                     *len -= 1;
                     Some(value)
                 }
@@ -105,7 +115,7 @@ impl<T, const N: usize> Queue<T, N> {
     }
 
     /// Removes and returns all elements from the queue as a Vec
-    pub fn take_all(&mut self) -> Vec<T> {
+    pub fn into_vec(&mut self) -> Vec<T> {
         match self {
             Self::Inline {
                 buf,
@@ -118,7 +128,7 @@ impl<T, const N: usize> Queue<T, N> {
                 for _ in 0..*len {
                     let val = unsafe { buf[idx].assume_init_read() };
                     result.push(val);
-                    idx = if idx + 1 == N { 0 } else { idx + 1 };
+                    idx = if unlikely(idx + 1 == N) { 0 } else { idx + 1 };
                 }
                 *head = 0;
                 *tail = 0;
@@ -319,7 +329,7 @@ impl<T, const N: usize> IntoIterator for Queue<T, N> {
     type IntoIter = IntoIter<T>;
 
     fn into_iter(mut self) -> Self::IntoIter {
-        let vec = self.take_all();
+        let vec = self.into_vec();
         IntoIter {
             inner: vec.into_iter(),
         }
@@ -343,7 +353,7 @@ mod tests {
     fn test_new_queue_is_empty() {
         let mut queue: Queue<i32, 4> = Queue::new();
         assert_eq!(queue.pop_front(), None);
-        assert_eq!(queue.take_all(), Vec::<i32>::new());
+        assert_eq!(queue.into_vec(), Vec::<i32>::new());
     }
 
     #[test]
@@ -463,10 +473,10 @@ mod tests {
         queue.push_back(2);
         queue.push_back(3);
 
-        let all = queue.take_all();
+        let all = queue.into_vec();
         assert_eq!(all, vec![1, 2, 3]);
         assert_eq!(queue.pop_front(), None);
-        assert_eq!(queue.take_all(), Vec::<i32>::new());
+        assert_eq!(queue.into_vec(), Vec::<i32>::new());
     }
 
     #[test]
@@ -477,7 +487,7 @@ mod tests {
         queue.push_back(3); // Spills to heap
         queue.push_back(4);
 
-        let all = queue.take_all();
+        let all = queue.into_vec();
         assert_eq!(all, vec![1, 2, 3, 4]);
         assert_eq!(queue.pop_front(), None);
     }
@@ -500,7 +510,7 @@ mod tests {
         queue.push_back(5);
         queue.push_back(6);
 
-        let all = queue.take_all();
+        let all = queue.into_vec();
         assert_eq!(all, vec![3, 4, 5, 6]);
         assert_eq!(queue.pop_front(), None);
     }
@@ -510,7 +520,7 @@ mod tests {
         let mut queue: Queue<i32, 4> = Queue::new();
 
         assert_eq!(queue.pop_front(), None);
-        assert_eq!(queue.take_all(), Vec::<i32>::new());
+        assert_eq!(queue.into_vec(), Vec::<i32>::new());
 
         // After operations, should still work
         queue.push_back(1);
@@ -575,7 +585,7 @@ mod tests {
         }
 
         // Take all remaining
-        let remaining = queue.take_all();
+        let remaining = queue.into_vec();
         let expected: Vec<i32> = (50..100).chain(100..150).collect();
         assert_eq!(remaining, expected);
     }
@@ -650,7 +660,7 @@ mod tests {
         queue.push_back(5);
 
         // Now we have: [4, 5, 3] with head pointing to index 2 (element 3)
-        let all = queue.take_all();
+        let all = queue.into_vec();
         assert_eq!(all, vec![3, 4, 5]);
     }
 
@@ -660,7 +670,7 @@ mod tests {
 
         queue.push_back(1);
         queue.push_back(2);
-        let _ = queue.take_all();
+        let _ = queue.into_vec();
 
         // Should be reset and reusable
         queue.push_back(3);
