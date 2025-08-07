@@ -2,3 +2,4 @@
 pub mod cell;
 pub mod mutex;
 pub mod queue;
+pub mod rwlock;

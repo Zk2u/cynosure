@@ -2,7 +2,7 @@
 
 # Skip async tests since Miri doesn't support io_uring syscalls
 [test]
-skip = ["test_async_no_await_in_closure", "test_async_shared_state"]
+skip = ["async"]
 
 # Miri flags for better debugging
 [env]
