@@ -7,6 +7,22 @@ license = "MIT"
 authors = ["zk2u <zk2u@pm.me>"]
 repository = "https://github.com/zk2u/cynosure"
 
+[features]
+default = ["site_c", "site_d"]
+# Hinting for CPU branch prediction
+hints = []
+
+# activates all site_c functionality
+site_c = ["cell", "mutex", "queue", "rwlock"]
+cell = []
+mutex = ["cell", "queue", "hints"]
+queue = ["hints"]
+rwlock = ["cell", "queue", "hints"]
+
+# activates all site_d functionality
+site_d = ["ringbuf"]
+ringbuf = ["hints"]
+
 [dev-dependencies]
 futures = "0.3.31"
 monoio = "0.2.4"
