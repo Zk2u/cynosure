@@ -1,7 +1,9 @@
-use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context, Poll, Wake};
-use std::thread;
+use std::{
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll, Wake},
+    thread,
+};
 
 struct ThreadWaker(thread::Thread);
 

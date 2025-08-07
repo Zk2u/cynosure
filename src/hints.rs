@@ -38,17 +38,20 @@ pub fn cold_and_empty() {}
 
 /// Aborts the execution of the process immediately and without any cleanup.
 ///
-/// This function is used to indicate a critical and unrecoverable error in the program.
-/// It terminates the process immediately without performing any cleanup or running destructors.
+/// This function is used to indicate a critical and unrecoverable error in the
+/// program. It terminates the process immediately without performing any
+/// cleanup or running destructors.
 ///
 /// This function is safe to call, so it does not require an unsafe block.
-/// Therefore, implementations must not require the user to uphold any safety invariants.
+/// Therefore, implementations must not require the user to uphold any safety
+/// invariants.
 ///
 /// If the std feature is enabled, this function calls std::process::abort()
 /// which is a more user-friendly and stable way of aborting the process.
 ///
 /// If the std feature is disabled, this function panics by calling panic!().
-/// In this case, by using `extern "C"` this function is guaranteed to not unwind.
+/// In this case, by using `extern "C"` this function is guaranteed to not
+/// unwind.
 #[cold]
 pub extern "C" fn abort() -> ! {
     #[cfg(not(unstable))]
@@ -89,8 +92,9 @@ pub unsafe fn assume(b: bool) {
 /// This intrinsic is primarily used with `if` statements.
 /// Using it in other contexts may not have any effect.
 ///
-/// Unlike most intrinsics, this function is safe to call and doesn't require an `unsafe` block.
-/// Therefore, implementations must not require the user to uphold any safety invariants.
+/// Unlike most intrinsics, this function is safe to call and doesn't require an
+/// `unsafe` block. Therefore, implementations must not require the user to
+/// uphold any safety invariants.
 #[inline(always)]
 pub fn likely(b: bool) -> bool {
     #[cfg(not(unstable))]
@@ -110,8 +114,9 @@ pub fn likely(b: bool) -> bool {
 /// This intrinsic is primarily used with `if` statements.
 /// Using it in other contexts may not have any effect.
 ///
-/// Unlike most intrinsics, this function is safe to call and doesn't require an `unsafe` block.
-/// Therefore, implementations must not require the user to uphold any safety invariants.
+/// Unlike most intrinsics, this function is safe to call and doesn't require an
+/// `unsafe` block. Therefore, implementations must not require the user to
+/// uphold any safety invariants.
 #[inline(always)]
 pub fn unlikely(b: bool) -> bool {
     #[cfg(not(unstable))]
@@ -138,8 +143,9 @@ pub fn unlikely(b: bool) -> bool {
 ///
 /// # Safety
 ///
-/// The caller must ensure that `addr` points to valid memory that can be safely read.
-/// The memory must remain valid for the duration of the prefetch operation.
+/// The caller must ensure that `addr` points to valid memory that can be safely
+/// read. The memory must remain valid for the duration of the prefetch
+/// operation.
 #[inline(always)]
 pub unsafe fn prefetch_read_data(addr: *const u8, locality: i32) {
     #[cfg(not(unstable))]
@@ -226,8 +232,9 @@ pub unsafe fn prefetch_read_data(addr: *const u8, locality: i32) {
 ///
 /// # Safety
 ///
-/// The caller must ensure that `addr` points to valid memory that can be safely written to.
-/// The memory must remain valid and mutable for the duration of the prefetch operation.
+/// The caller must ensure that `addr` points to valid memory that can be safely
+/// written to. The memory must remain valid and mutable for the duration of the
+/// prefetch operation.
 #[inline(always)]
 pub unsafe fn prefetch_write_data(addr: *const u8, locality: i32) {
     #[cfg(not(unstable))]

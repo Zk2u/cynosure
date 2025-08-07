@@ -6,9 +6,8 @@ use std::{
     task::{Context, Poll, Waker},
 };
 
-use crate::hints::likely;
-
 use super::{cell::ScopedCell, queue::Queue};
+use crate::hints::likely;
 
 /// A mutual exclusion primitive for single-threaded async executors.
 ///

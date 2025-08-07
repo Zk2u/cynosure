@@ -344,7 +344,8 @@ impl<T, const N: usize> Queue<T, N> {
 
     /// Makes the elements of the queue contiguous in memory
     ///
-    /// After calling this, the elements can be accessed as a single slice via `as_slices()`
+    /// After calling this, the elements can be accessed as a single slice via
+    /// `as_slices()`
     pub fn make_contiguous(&mut self) -> &mut [T] {
         match &mut self.0 {
             QueueInternal::Inline {

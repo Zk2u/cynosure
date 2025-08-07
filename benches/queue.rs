@@ -9,9 +9,7 @@ fn bench_queue_ops(c: &mut Criterion) {
     let mut group = c.benchmark_group("Queue Creation");
     group.bench_function("new<i32, 4>", |b| b.iter(Queue::<i32, 4>::new));
     group.bench_function("new<String, 4>", |b| b.iter(Queue::<String, 4>::new));
-    group.bench_function("new<Vec<i32>, 4>", |b| {
-        b.iter(Queue::<Vec<i32>, 4>::new)
-    });
+    group.bench_function("new<Vec<i32>, 4>", |b| b.iter(Queue::<Vec<i32>, 4>::new));
     group.finish();
 
     // Push operations with different queue capacities

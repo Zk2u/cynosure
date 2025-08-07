@@ -2,12 +2,14 @@
 
 use std::{cell::UnsafeCell, rc::Rc};
 
-/// ScopedCell is a [RefCell](std::cell::RefCell)-like type that allows for mutable access to its value
-/// within a scoped closure. This is useful for usecases in a single-threaded,
-/// async executor where you have multiple futures sharing the same data,
-/// wanting to mutate it without needing to hold a mutable reference to it over an await point.
-/// ScopedCell usually has identical or slightly better performance than RefCell,
-/// but with a slightly different access pattern which is more ergonomic for single-threaded async code.
+/// ScopedCell is a [RefCell](std::cell::RefCell)-like type that allows for
+/// mutable access to its value within a scoped closure. This is useful for
+/// usecases in a single-threaded, async executor where you have multiple
+/// futures sharing the same data, wanting to mutate it without needing to hold
+/// a mutable reference to it over an await point. ScopedCell usually has
+/// identical or slightly better performance than RefCell, but with a slightly
+/// different access pattern which is more ergonomic for single-threaded async
+/// code.
 ///
 /// **IMPORTANT**: You must NOT access a `ScopedCell` through multiple clones
 /// simultaneously (e.g., calling `with()` on one clone while inside a
@@ -37,7 +39,8 @@ impl<T> ScopedCell<T> {
         }
     }
 
-    /// Shortcut for creating a new `ScopedCell` inside a reference-counted pointer.
+    /// Shortcut for creating a new `ScopedCell` inside a reference-counted
+    /// pointer.
     pub fn rc(value: T) -> Rc<Self> {
         Rc::new(Self::new(value))
     }
@@ -131,8 +134,8 @@ impl<T: std::fmt::Debug> std::fmt::Debug for ScopedCell<T> {
 //         // Verify all clones see the change
 //         for (i, cell) in cells.iter().enumerate() {
 //             cell.with(|value| {
-//                 assert_eq!(*value, 100, "Clone {} should see updated value", i);
-//             });
+//                 assert_eq!(*value, 100, "Clone {} should see updated value",
+// i);             });
 //         }
 //     }
 
@@ -314,8 +317,8 @@ impl<T: std::fmt::Debug> std::fmt::Debug for ScopedCell<T> {
 //         fn assert_not_send<T: ?Sized>() {}
 //         fn assert_not_sync<T: ?Sized>() {}
 
-//         // These should compile, confirming ScopedCell is neither Send nor Sync
-//         assert_not_send::<ScopedCell<i32>>();
+//         // These should compile, confirming ScopedCell is neither Send nor
+// Sync         assert_not_send::<ScopedCell<i32>>();
 //         assert_not_sync::<ScopedCell<i32>>();
 //     }
 
@@ -377,8 +380,8 @@ impl<T: std::fmt::Debug> std::fmt::Debug for ScopedCell<T> {
 //         println!("Multiple references: {:?}", cell);
 //         println!(
 //             "Complex type: {:?}",
-//             ScopedCell::new(std::collections::HashMap::from([("key", "value")]))
-//         );
+//             ScopedCell::new(std::collections::HashMap::from([("key",
+// "value")]))         );
 
 //         // Just verify it doesn't panic
 //         assert!(format!("{:?}", cell2).len() > 0);

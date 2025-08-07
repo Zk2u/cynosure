@@ -6,9 +6,8 @@ use std::{
     task::{Context, Poll, Waker},
 };
 
-use crate::hints::likely;
-
 use super::{cell::ScopedCell, queue::Queue};
+use crate::hints::likely;
 
 /// A reader-writer lock for single-threaded async executors.
 ///
@@ -233,8 +232,9 @@ impl<'a, T> Drop for LocalRwLockWriteGuard<'a, T> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+
+    use super::*;
 
     fn dummy_waker() -> Waker {
         unsafe fn clone(_: *const ()) -> RawWaker {
