@@ -162,10 +162,10 @@ async fn test_event_bus_pattern() {
     // Register handlers
     bus.handlers.with_mut(|h| {
         h.push(Box::new(|event| {
-            println!("Handler 1: {}", event);
+            println!("Handler 1: {event}");
         }));
         h.push(Box::new(|event| {
-            println!("Handler 2: {}", event);
+            println!("Handler 2: {event}");
         }));
     });
 
@@ -262,7 +262,7 @@ async fn test_cached_computation() {
 
             if should_compute {
                 // Simulate expensive computation
-                let result = format!("Computed by task {}", i);
+                let result = format!("Computed by task {i}");
 
                 cache.with_mut(|c| {
                     c.value = Some(result);

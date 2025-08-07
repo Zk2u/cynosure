@@ -1105,8 +1105,8 @@ mod tests {
         );
 
         // Print performance comparison (bulk should be significantly faster)
-        println!("Individual operations: {:?}", individual_time);
-        println!("Bulk operations: {:?}", bulk_time);
+        println!("Individual operations: {individual_time:?}");
+        println!("Bulk operations: {bulk_time:?}");
         println!(
             "Speedup: {:.2}x",
             individual_time.as_secs_f64() / bulk_time.as_secs_f64()

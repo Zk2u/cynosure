@@ -213,7 +213,7 @@ fn bench_mutex_data_sizes(c: &mut Criterion) {
     let data_sizes = [8, 64, 512, 4096];
 
     for &size in &data_sizes {
-        let mut group = c.benchmark_group(format!("Data Size: {} bytes", size));
+        let mut group = c.benchmark_group(format!("Data Size: {size} bytes"));
 
         group.bench_with_input(BenchmarkId::new("LocalMutex", size), &size, |b, &size| {
             b.iter(|| {
@@ -318,7 +318,7 @@ fn bench_mutex_memory_overhead(c: &mut Criterion) {
     // Test creation overhead
     group.bench_function("LocalMutex::creation_overhead", |b| {
         b.iter(|| {
-            let mutexes: Vec<_> = (0..100).map(|i| LocalMutex::new(i)).collect();
+            let mutexes: Vec<_> = (0..100).map(LocalMutex::new).collect();
             black_box(mutexes);
         })
     });

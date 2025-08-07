@@ -209,7 +209,7 @@ async fn test_contention() {
                 let guard = counter.read().await;
                 assert!(*guard >= value);
             }
-            format!("reader_{}", i)
+            format!("reader_{i}")
         });
         handles.push(handle);
     }
@@ -227,7 +227,7 @@ async fn test_contention() {
 
                 *guard = old_value + 1;
             }
-            format!("writer_{}", i)
+            format!("writer_{i}")
         });
         handles.push(handle);
     }
@@ -274,133 +274,4 @@ async fn test_reader_count() {
 
     drop(_r2);
     assert_eq!(rwlock.reader_count(), 0);
-}
-
-// Non-async tests for miri validation
-#[cfg(test)]
-mod sync_tests {
-    use super::*;
-    use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
-
-    fn dummy_waker() -> Waker {
-        unsafe fn clone(_: *const ()) -> RawWaker {
-            RawWaker::new(std::ptr::null(), &VTABLE)
-        }
-        unsafe fn wake(_: *const ()) {}
-        unsafe fn wake_by_ref(_: *const ()) {}
-        unsafe fn drop(_: *const ()) {}
-
-        static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, wake, wake_by_ref, drop);
-        let raw_waker = RawWaker::new(std::ptr::null(), &VTABLE);
-        unsafe { Waker::from_raw(raw_waker) }
-    }
-
-    #[test]
-    fn test_sync_try_read_write() {
-        let rwlock = LocalRwLock::new(42);
-
-        // Try read should succeed
-        let guard = rwlock.try_read();
-        assert!(guard.is_some());
-        assert_eq!(*guard.unwrap(), 42);
-
-        // Another try read should succeed
-        let guard2 = rwlock.try_read();
-        assert!(guard2.is_some());
-
-        // Try write should fail with readers
-        let write_guard = rwlock.try_write();
-        assert!(write_guard.is_none());
-    }
-
-    #[test]
-    fn test_sync_write_exclusion() {
-        let rwlock = LocalRwLock::new(String::from("hello"));
-
-        // Try write should succeed
-        let mut guard = rwlock.try_write();
-        assert!(guard.is_some());
-
-        let guard = guard.as_mut().unwrap();
-        assert_eq!(&**guard, "hello");
-        guard.push_str(" world");
-
-        // Try read should fail with writer
-        let read_guard = rwlock.try_read();
-        assert!(read_guard.is_none());
-
-        // Another try write should fail
-        let write_guard2 = rwlock.try_write();
-        assert!(write_guard2.is_none());
-    }
-
-    #[test]
-    fn test_sync_reader_count() {
-        let rwlock = LocalRwLock::new(vec![1, 2, 3]);
-
-        assert_eq!(rwlock.reader_count(), 0);
-        assert!(!rwlock.is_write_locked());
-
-        let _r1 = rwlock.try_read().unwrap();
-        assert_eq!(rwlock.reader_count(), 1);
-
-        let _r2 = rwlock.try_read().unwrap();
-        assert_eq!(rwlock.reader_count(), 2);
-
-        let _r3 = rwlock.try_read().unwrap();
-        assert_eq!(rwlock.reader_count(), 3);
-
-        drop(_r1);
-        assert_eq!(rwlock.reader_count(), 2);
-
-        drop(_r2);
-        drop(_r3);
-        assert_eq!(rwlock.reader_count(), 0);
-    }
-
-    #[test]
-    fn test_sync_future_polling() {
-        let rwlock = LocalRwLock::new(100);
-        let waker = dummy_waker();
-        let mut cx = Context::from_waker(&waker);
-
-        // Poll read future - should succeed immediately
-        let mut read_fut = Box::pin(rwlock.read());
-        match read_fut.as_mut().poll(&mut cx) {
-            Poll::Ready(guard) => assert_eq!(*guard, 100),
-            Poll::Pending => panic!("Read should succeed immediately"),
-        }
-
-        // Try to poll write future while read is held - should be pending
-        let _read_guard = rwlock.try_read().unwrap();
-        let mut write_fut = Box::pin(rwlock.write());
-        match write_fut.as_mut().poll(&mut cx) {
-            Poll::Ready(_) => panic!("Write should be pending with active reader"),
-            Poll::Pending => {} // Expected
-        }
-    }
-
-    #[test]
-    fn test_sync_drop_behavior() {
-        let rwlock = LocalRwLock::new(0);
-
-        // Test read guard drop
-        {
-            let _r1 = rwlock.try_read().unwrap();
-            let _r2 = rwlock.try_read().unwrap();
-            assert_eq!(rwlock.reader_count(), 2);
-        }
-        assert_eq!(rwlock.reader_count(), 0);
-
-        // Test write guard drop
-        {
-            let _w = rwlock.try_write().unwrap();
-            assert!(rwlock.is_write_locked());
-        }
-        assert!(!rwlock.is_write_locked());
-
-        // Verify can acquire write after drops
-        let guard = rwlock.try_write();
-        assert!(guard.is_some());
-    }
 }

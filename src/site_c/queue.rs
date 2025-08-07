@@ -422,8 +422,8 @@ impl<T, const N: usize> Queue<T, N> {
     /// Panics if either index is out of bounds
     pub fn swap(&mut self, a: usize, b: usize) {
         let len = self.len();
-        assert!(a < len, "index {} out of bounds (len: {})", a, len);
-        assert!(b < len, "index {} out of bounds (len: {})", b, len);
+        assert!(a < len, "index {a} out of bounds (len: {len})");
+        assert!(b < len, "index {b} out of bounds (len: {len})");
 
         if unlikely(a == b) {
             return;
@@ -1124,7 +1124,7 @@ mod tests {
         queue.push_back(2);
         queue.push_back(3);
 
-        let debug_str = format!("{:?}", queue);
+        let debug_str = format!("{queue:?}");
         assert_eq!(debug_str, "[1, 2, 3]");
     }
 

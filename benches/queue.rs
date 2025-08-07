@@ -7,10 +7,10 @@ use cynosure::site_c::queue::Queue;
 fn bench_queue_ops(c: &mut Criterion) {
     // Creation benchmarks
     let mut group = c.benchmark_group("Queue Creation");
-    group.bench_function("new<i32, 4>", |b| b.iter(|| Queue::<i32, 4>::new()));
-    group.bench_function("new<String, 4>", |b| b.iter(|| Queue::<String, 4>::new()));
+    group.bench_function("new<i32, 4>", |b| b.iter(Queue::<i32, 4>::new));
+    group.bench_function("new<String, 4>", |b| b.iter(Queue::<String, 4>::new));
     group.bench_function("new<Vec<i32>, 4>", |b| {
-        b.iter(|| Queue::<Vec<i32>, 4>::new())
+        b.iter(Queue::<Vec<i32>, 4>::new)
     });
     group.finish();
 
@@ -24,7 +24,7 @@ fn bench_queue_ops(c: &mut Criterion) {
             b.iter(|| {
                 let mut queue = Queue::<i32, 2>::new();
                 for i in 0..1 {
-                    queue.push_back(black_box(i as i32));
+                    queue.push_back(black_box(i));
                 }
                 black_box(queue)
             })
@@ -35,7 +35,7 @@ fn bench_queue_ops(c: &mut Criterion) {
             b.iter(|| {
                 let mut queue = Queue::<i32, 2>::new();
                 for i in 0..6 {
-                    queue.push_back(black_box(i as i32));
+                    queue.push_back(black_box(i));
                 }
                 black_box(queue)
             })
@@ -52,7 +52,7 @@ fn bench_queue_ops(c: &mut Criterion) {
             b.iter(|| {
                 let mut queue = Queue::<i32, 4>::new();
                 for i in 0..3 {
-                    queue.push_back(black_box(i as i32));
+                    queue.push_back(black_box(i));
                 }
                 black_box(queue)
             })
@@ -63,7 +63,7 @@ fn bench_queue_ops(c: &mut Criterion) {
             b.iter(|| {
                 let mut queue = Queue::<i32, 4>::new();
                 for i in 0..8 {
-                    queue.push_back(black_box(i as i32));
+                    queue.push_back(black_box(i));
                 }
                 black_box(queue)
             })
@@ -80,7 +80,7 @@ fn bench_queue_ops(c: &mut Criterion) {
             b.iter(|| {
                 let mut queue = Queue::<i32, 8>::new();
                 for i in 0..7 {
-                    queue.push_back(black_box(i as i32));
+                    queue.push_back(black_box(i));
                 }
                 black_box(queue)
             })
@@ -91,7 +91,7 @@ fn bench_queue_ops(c: &mut Criterion) {
             b.iter(|| {
                 let mut queue = Queue::<i32, 8>::new();
                 for i in 0..12 {
-                    queue.push_back(black_box(i as i32));
+                    queue.push_back(black_box(i));
                 }
                 black_box(queue)
             })
@@ -108,7 +108,7 @@ fn bench_queue_ops(c: &mut Criterion) {
             b.iter(|| {
                 let mut queue = Queue::<i32, 16>::new();
                 for i in 0..15 {
-                    queue.push_back(black_box(i as i32));
+                    queue.push_back(black_box(i));
                 }
                 black_box(queue)
             })
@@ -119,7 +119,7 @@ fn bench_queue_ops(c: &mut Criterion) {
             b.iter(|| {
                 let mut queue = Queue::<i32, 16>::new();
                 for i in 0..20 {
-                    queue.push_back(black_box(i as i32));
+                    queue.push_back(black_box(i));
                 }
                 black_box(queue)
             })
@@ -137,7 +137,7 @@ fn bench_queue_ops(c: &mut Criterion) {
             b.iter(|| {
                 let mut queue = Queue::<i32, 4>::new();
                 for i in 0..3 {
-                    queue.push_back(i as i32);
+                    queue.push_back(i);
                 }
                 for _ in 0..3 {
                     black_box(queue.pop_front());
@@ -150,7 +150,7 @@ fn bench_queue_ops(c: &mut Criterion) {
             b.iter(|| {
                 let mut queue = Queue::<i32, 4>::new();
                 for i in 0..8 {
-                    queue.push_back(i as i32);
+                    queue.push_back(i);
                 }
                 for _ in 0..8 {
                     black_box(queue.pop_front());
@@ -169,7 +169,7 @@ fn bench_queue_ops(c: &mut Criterion) {
             b.iter(|| {
                 let mut queue = Queue::<i32, 8>::new();
                 for i in 0..7 {
-                    queue.push_back(i as i32);
+                    queue.push_back(i);
                 }
                 for _ in 0..7 {
                     black_box(queue.pop_front());
@@ -182,7 +182,7 @@ fn bench_queue_ops(c: &mut Criterion) {
             b.iter(|| {
                 let mut queue = Queue::<i32, 8>::new();
                 for i in 0..12 {
-                    queue.push_back(i as i32);
+                    queue.push_back(i);
                 }
                 for _ in 0..12 {
                     black_box(queue.pop_front());
@@ -202,7 +202,7 @@ fn bench_queue_ops(c: &mut Criterion) {
             b.iter(|| {
                 let mut queue = Queue::<i32, 4>::new();
                 for i in 0..3 {
-                    queue.push_back(i as i32);
+                    queue.push_back(i);
                 }
                 black_box(queue.into_vec())
             })
@@ -213,7 +213,7 @@ fn bench_queue_ops(c: &mut Criterion) {
             b.iter(|| {
                 let mut queue = Queue::<i32, 4>::new();
                 for i in 0..8 {
-                    queue.push_back(i as i32);
+                    queue.push_back(i);
                 }
                 black_box(queue.into_vec())
             })
@@ -230,7 +230,7 @@ fn bench_queue_ops(c: &mut Criterion) {
             b.iter(|| {
                 let mut queue = Queue::<i32, 8>::new();
                 for i in 0..7 {
-                    queue.push_back(i as i32);
+                    queue.push_back(i);
                 }
                 black_box(queue.into_vec())
             })
@@ -241,7 +241,7 @@ fn bench_queue_ops(c: &mut Criterion) {
             b.iter(|| {
                 let mut queue = Queue::<i32, 8>::new();
                 for i in 0..12 {
-                    queue.push_back(i as i32);
+                    queue.push_back(i);
                 }
                 black_box(queue.into_vec())
             })
@@ -260,7 +260,7 @@ fn bench_queue_ops(c: &mut Criterion) {
                 || {
                     let mut queue = Queue::<i32, 4>::new();
                     for i in 0..3 {
-                        queue.push_back(i as i32);
+                        queue.push_back(i);
                     }
                     queue
                 },
@@ -281,7 +281,7 @@ fn bench_queue_ops(c: &mut Criterion) {
                 || {
                     let mut queue = Queue::<i32, 4>::new();
                     for i in 0..8 {
-                        queue.push_back(i as i32);
+                        queue.push_back(i);
                     }
                     queue
                 },
@@ -308,7 +308,7 @@ fn bench_queue_ops(c: &mut Criterion) {
                 || {
                     let mut queue = Queue::<i32, 8>::new();
                     for i in 0..7 {
-                        queue.push_back(i as i32);
+                        queue.push_back(i);
                     }
                     queue
                 },
@@ -329,7 +329,7 @@ fn bench_queue_ops(c: &mut Criterion) {
                 || {
                     let mut queue = Queue::<i32, 8>::new();
                     for i in 0..12 {
-                        queue.push_back(i as i32);
+                        queue.push_back(i);
                     }
                     queue
                 },
@@ -355,7 +355,7 @@ fn bench_comparison(c: &mut Criterion) {
     // Push single item
     group.bench_function("Queue<i32, 8>::push_back", |b| {
         b.iter_batched(
-            || Queue::<i32, 8>::new(),
+            Queue::<i32, 8>::new,
             |mut queue| queue.push_back(black_box(42)),
             criterion::BatchSize::SmallInput,
         )
@@ -363,7 +363,7 @@ fn bench_comparison(c: &mut Criterion) {
 
     group.bench_function("VecDeque::push_back", |b| {
         b.iter_batched(
-            || VecDeque::<i32>::new(),
+            VecDeque::<i32>::new,
             |mut queue| queue.push_back(black_box(42)),
             criterion::BatchSize::SmallInput,
         )

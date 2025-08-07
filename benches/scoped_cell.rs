@@ -83,7 +83,7 @@ fn bench_scopedcell_ops(c: &mut Criterion) {
     group.bench_function("with_mut_string_append", |b| {
         b.iter(|| {
             cell_string.with_mut(|s| {
-                s.push_str("!");
+                s.push('!');
                 s.pop();
             })
         })

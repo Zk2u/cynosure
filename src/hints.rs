@@ -135,6 +135,11 @@ pub fn unlikely(b: bool) -> bool {
 ///
 /// * `addr` - A pointer to the data to prefetch.
 /// * `locality` - The cache locality to prefetch into.
+///
+/// # Safety
+///
+/// The caller must ensure that `addr` points to valid memory that can be safely read.
+/// The memory must remain valid for the duration of the prefetch operation.
 #[inline(always)]
 pub unsafe fn prefetch_read_data(addr: *const u8, locality: i32) {
     #[cfg(not(unstable))]
@@ -217,7 +222,12 @@ pub unsafe fn prefetch_read_data(addr: *const u8, locality: i32) {
 /// # Arguments
 ///
 /// * `addr` - A pointer to the data to prefetch.
+/// * `locality` - The cache locality to prefetch into.
 ///
+/// # Safety
+///
+/// The caller must ensure that `addr` points to valid memory that can be safely written to.
+/// The memory must remain valid and mutable for the duration of the prefetch operation.
 #[inline(always)]
 pub unsafe fn prefetch_write_data(addr: *const u8, locality: i32) {
     #[cfg(not(unstable))]
@@ -225,7 +235,7 @@ pub unsafe fn prefetch_write_data(addr: *const u8, locality: i32) {
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         unsafe {
             match locality {
-                0 | 1 | 2 => core::arch::asm!(
+                0..=2 => core::arch::asm!(
                     "prefetchw [{}]",
                     in(reg) addr,
                     options(nostack, readonly, preserves_flags)
