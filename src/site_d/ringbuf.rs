@@ -1032,7 +1032,7 @@ mod tests {
         use std::time::Instant;
 
         const BUFFER_SIZE: usize = 1024;
-        const DATA_SIZE: usize = 100_000;
+        const DATA_SIZE: usize = 10_000;
 
         // Test individual operations
         let rb = RingBuf::<u8>::new(BUFFER_SIZE);

@@ -38,49 +38,8 @@ rustup +nightly component add rust-src
 
 ## Running Miri Tests
 
-### Using the Provided Script
-
-The project includes a `miri-test.sh` script for convenient testing:
-
-```bash
-# Make script executable (first time only)
-chmod +x miri-test.sh
-
-# Run all library tests (excluding async tests)
-./miri-test.sh
-
-# Run only Queue tests
-./miri-test.sh queue
-
-# Run only LocalCell tests
-./miri-test.sh localcell
-
-# Run with extra strict checking
-./miri-test.sh strict
-
-# Run a specific test
-./miri-test.sh test test_count_during_mutations
-
-# Show help
-./miri-test.sh help
 ```
-
-### Manual Commands
-
-You can also run Miri manually:
-
-```bash
-# Run all lib tests (excluding async)
-MIRIFLAGS="-Zmiri-backtrace=full" cargo +nightly miri test --lib -- \
-  --skip test_async_no_await_in_closure \
-  --skip test_async_shared_state
-
-# Run specific test with detailed output
-MIRIFLAGS="-Zmiri-backtrace=full -Zmiri-strict-provenance" \
-  cargo +nightly miri test --lib test_name
-
-# Run with tag tracking for better stacked borrows debugging
-MIRIFLAGS="-Zmiri-tag-tracking" cargo +nightly miri test --lib
+just miri
 ```
 
 ## Miri Flags
@@ -106,8 +65,7 @@ Useful Miri flags for debugging:
 
 ```bash
 cargo +nightly miri test --lib -- \
-  --skip test_async_no_await_in_closure \
-  --skip test_async_shared_state
+  --skip async
 ```
 
 ### 2. Stacked Borrows Violations

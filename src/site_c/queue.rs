@@ -359,8 +359,10 @@ impl<T, const N: usize> Queue<T, N> {
 
                 // If already contiguous, nothing to do
                 if *head < *tail || (*head == *tail && *len == 0) {
-                    let slice =
-                        unsafe { std::slice::from_raw_parts_mut(buf[*head].as_mut_ptr(), *len) };
+                    let slice = unsafe {
+                        let ptr = buf.as_mut_ptr().add(*head) as *mut T;
+                        std::slice::from_raw_parts_mut(ptr, *len)
+                    };
                     return slice;
                 }
 
@@ -382,7 +384,7 @@ impl<T, const N: usize> Queue<T, N> {
                 *head = 0;
                 *tail = *len;
 
-                unsafe { std::slice::from_raw_parts_mut(buf[0].as_mut_ptr(), *len) }
+                unsafe { std::slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut T, *len) }
             }
             QueueInternal::Heap(vec) => vec.make_contiguous(),
         }
