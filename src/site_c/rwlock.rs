@@ -104,10 +104,11 @@ impl<T> LocalRwLock<T> {
             state.readers -= 1;
 
             // If no more readers, wake a writer if any
-            if state.readers == 0 && !state.write_waiters.is_empty() {
-                if let Some(waker) = state.write_waiters.pop_front() {
-                    waker.wake();
-                }
+            if state.readers == 0
+                && !state.write_waiters.is_empty()
+                && let Some(waker) = state.write_waiters.pop_front()
+            {
+                waker.wake();
             }
         });
     }
