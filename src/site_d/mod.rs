@@ -2,3 +2,5 @@
 pub mod padding;
 #[cfg(feature = "ringbuf")]
 pub mod ringbuf;
+#[cfg(feature = "triplebuffer")]
+pub mod triplebuffer;
