@@ -1,7 +1,7 @@
 # Cynosure
 
 A group of high performance, lightweight datastructures mostly optimized for usage in single-threaded
-async executors, but some structures can be used elsewhere. Zero dependencies.
+async executors, but some structures can be used elsewhere. Zero dependencies by default.
 
 The crate is split into `site_c` and `site_d`. `site_c` are single-thread only, and `site_d`
 primitives work across multiple threads.
@@ -17,3 +17,4 @@ Intentionally doesn't work over await points.
 ## `site_d`
 
 - `RingBuf`: lock-free SPSC ring buffer with async and sync support.
+- `TripleBuffer`: lock-free SPSC asynchronous triple buffer

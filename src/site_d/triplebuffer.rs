@@ -1,11 +1,20 @@
 use futures::task::AtomicWaker;
-use std::alloc::{Layout, alloc_zeroed, dealloc};
-use std::future::Future;
-use std::ops::{Deref, DerefMut};
-use std::pin::Pin;
-use std::ptr::{self, NonNull};
-use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
-use std::task::{Context, Poll};
+#[cfg(feature = "monoio-0_2")]
+use monoio::buf::{IoBuf, IoBufMut};
+use std::{
+    alloc::{Layout, alloc_zeroed, dealloc},
+    cell::Cell,
+    future::Future,
+    marker::PhantomData,
+    ops::{Deref, DerefMut},
+    pin::Pin,
+    ptr::{self, NonNull},
+    sync::{
+        Arc,
+        atomic::{AtomicPtr, AtomicUsize, Ordering},
+    },
+    task::{Context, Poll},
+};
 
 use crate::hints::{likely, unlikely};
 use crate::site_d::padding::CachePadded;
@@ -22,6 +31,7 @@ pub const BUFFER_ALIGN: usize = 4096;
 pub struct AlignedBuffer {
     ptr: NonNull<u8>,
     len: usize,
+    cap: usize,
 }
 
 impl AlignedBuffer {
@@ -40,31 +50,57 @@ impl AlignedBuffer {
 
         Self {
             ptr,
-            len: BUFFER_SIZE,
+            len: 0,
+            cap: BUFFER_SIZE,
         }
     }
 
-    /// Convert into a raw data pointer (caller becomes responsible to reconstruct with `from_raw`).
-    pub fn into_raw(self) -> *mut u8 {
+    /// Convert into a raw data pointer and the initialized length.
+    /// Caller becomes responsible to reconstruct with `from_raw_with_len`.
+    pub fn into_raw(self) -> (*mut u8, usize) {
         let p = self.ptr.as_ptr();
+        let len = self.len;
         std::mem::forget(self);
-        p
+        (p, len)
     }
 
-    /// Reconstruct an owner from a raw data pointer allocated by `AlignedBuffer::new`.
+    pub fn capacity(&self) -> usize {
+        self.cap
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Reconstruct with explicit initialized length.
     ///
-    /// Safety: `ptr` must have been produced by `AlignedBuffer::into_raw` (same size and alignment).
-    pub unsafe fn from_raw(ptr: *mut u8) -> Self {
+    /// # Safety
+    ///
+    /// `ptr` must be produced by `AlignedBuffer::into_raw` and refer to a buffer
+    /// with `cap == BUFFER_SIZE`. `len` must be <= `BUFFER_SIZE`.
+    pub unsafe fn from_raw_with_len(ptr: *mut u8, len: usize) -> Self {
         debug_assert!(!ptr.is_null());
         debug_assert_eq!((ptr as usize) % BUFFER_ALIGN, 0);
+        debug_assert!(len <= BUFFER_SIZE);
         Self {
             ptr: unsafe { NonNull::new_unchecked(ptr) },
-            len: BUFFER_SIZE,
+            len,
+            cap: BUFFER_SIZE,
         }
     }
 
     pub fn as_mut_ptr(&mut self) -> *mut u8 {
         self.ptr.as_ptr()
+    }
+}
+
+impl Default for AlignedBuffer {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -74,6 +110,7 @@ impl Deref for AlignedBuffer {
         unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
     }
 }
+
 impl DerefMut for AlignedBuffer {
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
@@ -89,6 +126,34 @@ impl Drop for AlignedBuffer {
 unsafe impl Send for AlignedBuffer {}
 unsafe impl Sync for AlignedBuffer {} // optional; safe as explained
 
+#[cfg(feature = "monoio-0_2")]
+unsafe impl IoBuf for AlignedBuffer {
+    fn read_ptr(&self) -> *const u8 {
+        self.ptr.as_ptr()
+    }
+
+    fn bytes_init(&self) -> usize {
+        self.len
+    }
+}
+
+#[cfg(feature = "monoio-0_2")]
+unsafe impl IoBufMut for AlignedBuffer {
+    fn write_ptr(&mut self) -> *mut u8 {
+        self.ptr.as_ptr()
+    }
+
+    fn bytes_total(&mut self) -> usize {
+        self.cap
+    }
+
+    unsafe fn set_init(&mut self, pos: usize) {
+        self.len = pos;
+    }
+}
+
+// ================== Internal shared state (hidden) ==================
+
 struct SharedState {
     // Index of the buffer currently in the middle slot.
     middle_idx: AtomicUsize,
@@ -103,15 +168,14 @@ struct Waiters {
     writer: AtomicWaker, // one writer task
 }
 
-/// Lock-free triple buffer with async backpressure (SPSC).
+/// Internal lock-free triple buffer with async backpressure (SPSC).
 ///
-/// - One writer task and one reader task.
-/// - Writer publishes only when middle is free; otherwise awaits (no data loss).
-/// - Uses aligned buffers safe for O_DIRECT.
-/// - Uses `AtomicWaker` for wakeups.
-pub struct TripleBuffer {
+/// Hidden from public API; accessed only via TripleBufWriter/TripleBufReader.
+struct TripleBuffer {
     // Three buffer data pointers; at most one slot can be null (held out-of-structure by writer or reader).
     buffers: [AtomicPtr<u8>; 3],
+    // Lengths of the buffers in each slot.
+    lens: [AtomicUsize; 3],
 
     // === Writer's cache line ===
     writer_idx: CachePadded<AtomicUsize>,
@@ -128,7 +192,7 @@ pub struct TripleBuffer {
 
 impl TripleBuffer {
     /// Create a new triple buffer and return it along with the initial writer-owned buffer.
-    pub fn new() -> (Self, AlignedBuffer) {
+    fn new() -> (Self, AlignedBuffer) {
         let b0 = AlignedBuffer::new();
         let b1 = AlignedBuffer::new();
         let b2 = AlignedBuffer::new();
@@ -136,8 +200,13 @@ impl TripleBuffer {
         let buffer = Self {
             buffers: [
                 AtomicPtr::new(ptr::null_mut()), // Writer holds b0
-                AtomicPtr::new(b1.into_raw()),   // Stored in slot 1
-                AtomicPtr::new(b2.into_raw()),   // Stored in slot 2
+                AtomicPtr::new(b1.into_raw().0), // Stored in slot 1
+                AtomicPtr::new(b2.into_raw().0), // Stored in slot 2
+            ],
+            lens: [
+                AtomicUsize::new(0), // Length of b0
+                AtomicUsize::new(0), // Length of b1
+                AtomicUsize::new(0), // Length of b2
             ],
             writer_idx: CachePadded::new(AtomicUsize::new(0)), // Writer starts with index 0
             reader_idx: CachePadded::new(AtomicUsize::new(1)), // Reader starts with index 1
@@ -157,10 +226,12 @@ impl TripleBuffer {
 
     // ------------- Wake/registration -------------
 
+    #[inline(always)]
     fn wake_reader(&self) {
         self.waiters.as_ref().reader.wake();
     }
 
+    #[inline(always)]
     fn wake_writer(&self) {
         self.waiters.as_ref().writer.wake();
     }
@@ -213,12 +284,13 @@ impl TripleBuffer {
 
     /// Writer publishes its completed buffer, rotating it with the middle.
     /// Precondition: `middle_free()` should be true (checked by async wrapper).
+    #[inline(always)]
     fn writer_publish_now(&self, completed: AlignedBuffer) -> AlignedBuffer {
         // Convert to raw pointer for atomic slot
-        let completed_ptr = completed.into_raw();
+        let (completed_ptr, completed_len) = completed.into_raw();
 
         // Load current indices (current view)
-        let writer_idx = self.writer_idx.as_ref().load(Ordering::Acquire);
+        let writer_idx = self.writer_idx.as_ref().load(Ordering::Relaxed);
         let middle_idx = self
             .shared_state
             .as_ref()
@@ -226,17 +298,18 @@ impl TripleBuffer {
             .load(Ordering::Acquire);
 
         // Return completed buffer to writer slot; it must be empty
-        let old = self.buffers[writer_idx].swap(completed_ptr, Ordering::AcqRel);
+        let old = self.buffers[writer_idx].swap(completed_ptr, Ordering::Release);
         debug_assert!(old.is_null(), "writer slot not empty");
+        self.lens[writer_idx].store(completed_len, Ordering::Relaxed);
 
         // Rotate indices: writer takes middle; middle becomes old writer slot
         self.writer_idx
             .as_ref()
-            .store(middle_idx, Ordering::Release);
+            .store(middle_idx, Ordering::Relaxed);
         self.shared_state
             .as_ref()
             .middle_idx
-            .store(writer_idx, Ordering::Release);
+            .store(writer_idx, Ordering::Relaxed);
 
         // Increment generation to publish; pairs with reader's Acquire observations
         self.shared_state
@@ -245,12 +318,12 @@ impl TripleBuffer {
             .fetch_add(1, Ordering::Release);
 
         // Take buffer from what was middle (now writer's)
-        let ptr = self.buffers[middle_idx].swap(ptr::null_mut(), Ordering::AcqRel);
+        let ptr = self.buffers[middle_idx].swap(ptr::null_mut(), Ordering::Acquire);
         if unlikely(ptr.is_null()) {
             panic!("Invariant violated: middle buffer pointer was null");
         }
 
-        let next = unsafe { AlignedBuffer::from_raw(ptr) };
+        let next = unsafe { AlignedBuffer::from_raw_with_len(ptr, 0) };
 
         // Notify reader that new data is ready
         self.wake_reader();
@@ -260,6 +333,7 @@ impl TripleBuffer {
 
     /// Reader consumes latest buffer if present, returning it.
     /// Precondition: `has_unread()` must be true (checked by async wrapper).
+    #[inline(always)]
     fn reader_take_now(&self, previous: Option<AlignedBuffer>) -> AlignedBuffer {
         // Observe current generation; we will commit it after removing the middle buffer
         let generation = self
@@ -269,36 +343,38 @@ impl TripleBuffer {
             .load(Ordering::Acquire);
 
         // Get current indices
-        let reader_idx = self.reader_idx.as_ref().load(Ordering::Acquire);
+        let reader_idx = self.reader_idx.as_ref().load(Ordering::Relaxed);
         let middle_idx = self
             .shared_state
             .as_ref()
             .middle_idx
-            .load(Ordering::Acquire);
+            .load(Ordering::Relaxed);
 
         // Return previous buffer (if any) into the reader slot; it must be empty
         if let Some(prev) = previous {
-            let prev_ptr = prev.into_raw();
-            let old = self.buffers[reader_idx].swap(prev_ptr, Ordering::AcqRel);
+            let (prev_ptr, _) = prev.into_raw();
+            let old = self.buffers[reader_idx].swap(prev_ptr, Ordering::Release);
             debug_assert!(old.is_null(), "reader slot not empty");
+            self.lens[reader_idx].store(0, Ordering::Relaxed);
         }
 
         // Rotate indices: reader takes middle; middle becomes old reader slot
         self.reader_idx
             .as_ref()
-            .store(middle_idx, Ordering::Release);
+            .store(middle_idx, Ordering::Relaxed);
         self.shared_state
             .as_ref()
             .middle_idx
-            .store(reader_idx, Ordering::Release);
+            .store(reader_idx, Ordering::Relaxed);
 
         // Take buffer from what was middle (now reader's)
-        let ptr = self.buffers[middle_idx].swap(ptr::null_mut(), Ordering::AcqRel);
+        let ptr = self.buffers[middle_idx].swap(ptr::null_mut(), Ordering::Acquire);
         if unlikely(ptr.is_null()) {
             panic!("Invariant violated: middle buffer pointer was null");
         }
+        let published_len = self.lens[middle_idx].load(Ordering::Relaxed);
 
-        let buf = unsafe { AlignedBuffer::from_raw(ptr) };
+        let buf = unsafe { AlignedBuffer::from_raw_with_len(ptr, published_len) };
 
         // Commit: mark this generation as read only after we've removed the buffer from the middle
         self.shared_state
@@ -312,29 +388,10 @@ impl TripleBuffer {
         buf
     }
 
-    // ------------- Async-style API -------------
-
-    /// Returns a future that publishes `completed` when the reader has consumed the previous data.
-    /// Never drops/overwrites unread data.
-    pub fn writer_publish<'a>(&'a self, completed: AlignedBuffer) -> WriterPublish<'a> {
-        WriterPublish {
-            tb: self,
-            buf: Some(completed),
-        }
-    }
-
-    /// Returns a future that yields the next available buffer.
-    /// If `previous` is Some, it is returned to the pool.
-    pub fn reader_next<'a>(&'a self, previous: Option<AlignedBuffer>) -> ReaderNext<'a> {
-        ReaderNext {
-            tb: self,
-            prev: previous,
-        }
-    }
-
     // ------------- Synchronous helpers -------------
 
-    pub fn stats(&self) -> BufferStats {
+    #[inline(always)]
+    fn stats(&self) -> BufferStats {
         BufferStats {
             writer_idx: self.writer_idx.as_ref().load(Ordering::Relaxed),
             reader_idx: self.reader_idx.as_ref().load(Ordering::Relaxed),
@@ -352,7 +409,97 @@ impl TripleBuffer {
     }
 }
 
-/// Future returned by `TripleBuffer::writer_publish`
+impl Drop for TripleBuffer {
+    fn drop(&mut self) {
+        unsafe {
+            // Free any remaining buffers in slots
+            for i in 0..3 {
+                let ptr = self.buffers[i].load(Ordering::Relaxed);
+                if !ptr.is_null() {
+                    // Reconstruct and drop; safe because these were produced by AlignedBuffer::into_raw
+                    let _ = AlignedBuffer::from_raw_with_len(ptr, 0);
+                }
+            }
+        }
+    }
+}
+
+// ================== Public SPSC handles ==================
+
+/// Writer handle for the SPSC triple buffer.
+///
+/// - Non-cloneable. Send, but not Sync (move across threads, but don't share).
+pub struct TripleBufWriter {
+    inner: Arc<TripleBuffer>,
+    _nosync: PhantomData<Cell<()>>,
+}
+
+/// Reader handle for the SPSC triple buffer.
+///
+/// - Non-cloneable. Send, but not Sync (move across threads, but don't share).
+pub struct TripleBufReader {
+    inner: Arc<TripleBuffer>,
+    _nosync: PhantomData<Cell<()>>,
+}
+
+/// Construct a new SPSC triple buffer, returning the writer handle,
+/// reader handle, and the initial writer-owned buffer.
+pub fn triple_buffer() -> (TripleBufWriter, TripleBufReader, AlignedBuffer) {
+    let (tb, wbuf) = TripleBuffer::new();
+    let inner = Arc::new(tb);
+    let writer = TripleBufWriter {
+        inner: inner.clone(),
+        _nosync: PhantomData,
+    };
+    let reader = TripleBufReader {
+        inner,
+        _nosync: PhantomData,
+    };
+    (writer, reader, wbuf)
+}
+
+impl TripleBufWriter {
+    /// Publish `buf` when the reader has consumed the previous data.
+    /// Never drops/overwrites unread data.
+    ///
+    /// Requires `&mut self` so only one publish future can exist at a time per writer.
+    pub fn publish<'a>(&'a mut self, buf: AlignedBuffer) -> WriterPublish<'a> {
+        WriterPublish {
+            tb: &self.inner,
+            buf: Some(buf),
+        }
+    }
+
+    /// Snapshot statistics (debugging).
+    pub fn stats(&self) -> BufferStats {
+        self.inner.stats()
+    }
+}
+
+impl TripleBufReader {
+    /// Yield the next available buffer. If `previous` is Some, it is returned to the pool.
+    ///
+    /// Requires `&mut self` so only one read future can exist at a time per reader.
+    pub fn next<'a>(&'a mut self, previous: Option<AlignedBuffer>) -> ReaderNext<'a> {
+        ReaderNext {
+            tb: &self.inner,
+            prev: previous,
+        }
+    }
+
+    /// Snapshot statistics (debugging).
+    pub fn stats(&self) -> BufferStats {
+        self.inner.stats()
+    }
+}
+
+// Make handles Send but not Sync.
+unsafe impl Send for TripleBufWriter {}
+unsafe impl Send for TripleBufReader {}
+
+// ================== Futures (public types) ==================
+
+/// Future returned by `TripleBufWriter::publish`
 pub struct WriterPublish<'a> {
     tb: &'a TripleBuffer,
     buf: Option<AlignedBuffer>,
@@ -384,7 +531,7 @@ impl<'a> Future for WriterPublish<'a> {
     }
 }
 
-/// Future returned by `TripleBuffer::reader_next`
+/// Future returned by `TripleBufReader::next`
 pub struct ReaderNext<'a> {
     tb: &'a TripleBuffer,
     prev: Option<AlignedBuffer>,
@@ -414,7 +561,7 @@ impl<'a> Future for ReaderNext<'a> {
     }
 }
 
-/// Statistics about the triple buffer state
+/// Statistics about the triple buffer state (for debugging/visibility).
 #[derive(Debug, Clone, Copy)]
 pub struct BufferStats {
     pub writer_idx: usize,
@@ -423,28 +570,13 @@ pub struct BufferStats {
     pub generation: usize,
 }
 
-impl Drop for TripleBuffer {
-    fn drop(&mut self) {
-        unsafe {
-            // Free any remaining buffers in slots
-            for i in 0..3 {
-                let ptr = self.buffers[i].load(Ordering::Relaxed);
-                if !ptr.is_null() {
-                    // Reconstruct and drop; safe because these were produced by AlignedBuffer::into_raw
-                    let _ = AlignedBuffer::from_raw(ptr);
-                }
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::pin::Pin;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering as AO};
-    use std::task::Context;
+    use std::task::{Context, Waker};
     use std::thread;
     use std::time::Duration;
 
@@ -453,16 +585,12 @@ mod tests {
     // ----------------------------
 
     // A waker that unparks the current thread and flips a flag on wake.
-    fn thread_unpark_waker() -> (
-        std::task::Waker,
-        std::sync::Arc<std::sync::atomic::AtomicBool>,
-    ) {
+    fn thread_unpark_waker() -> (Waker, Arc<std::sync::atomic::AtomicBool>) {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering as AO};
         use std::task::{RawWaker, RawWakerVTable, Waker};
 
         unsafe fn clone(data: *const ()) -> RawWaker {
-            // Temporarily take ownership, clone, then restore the original.
             let arc = unsafe { Arc::<AtomicBool>::from_raw(data as *const AtomicBool) };
             let cloned = arc.clone();
             let _ = Arc::into_raw(arc); // restore original ownership
@@ -470,24 +598,20 @@ mod tests {
         }
 
         unsafe fn wake(data: *const ()) {
-            // wake consumes the waker: drop the Arc after use.
             let arc = unsafe { Arc::<AtomicBool>::from_raw(data as *const AtomicBool) };
             arc.store(true, AO::SeqCst);
             std::thread::current().unpark();
-            // arc drops here (no into_raw) — this releases one strong count
+            // arc drops here
         }
 
         unsafe fn wake_by_ref(data: *const ()) {
-            // Borrow only; do not take ownership.
             let arc = unsafe { &*(data as *const AtomicBool) };
             arc.store(true, AO::SeqCst);
             std::thread::current().unpark();
         }
 
         unsafe fn drop(data: *const ()) {
-            // Drop the owned Arc acquired at creation/clone.
             let _ = unsafe { Arc::<AtomicBool>::from_raw(data as *const AtomicBool) };
-            // drops here
         }
 
         static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, wake, wake_by_ref, drop);
@@ -540,13 +664,18 @@ mod tests {
     }
 
     // Read/write a u64 at the start of the buffer for sequencing tests.
+    // Note: we write/read via raw pointers (ignoring `len`) to keep tests simple.
     fn write_seq(buf: &mut AlignedBuffer, v: u64) {
         let bytes = v.to_le_bytes();
-        buf[..8].copy_from_slice(&bytes);
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf.as_mut_ptr(), 8);
+        }
     }
-    fn read_seq(buf: &AlignedBuffer) -> u64 {
+    fn read_seq(buf: &mut AlignedBuffer) -> u64 {
         let mut bytes = [0u8; 8];
-        bytes.copy_from_slice(&buf[..8]);
+        unsafe {
+            std::ptr::copy_nonoverlapping(buf.as_mut_ptr() as *const u8, bytes.as_mut_ptr(), 8);
+        }
         u64::from_le_bytes(bytes)
     }
 
@@ -557,7 +686,8 @@ mod tests {
     #[test]
     fn aligned_buffer_alignment_and_len() {
         let mut b = AlignedBuffer::new();
-        assert_eq!(b.len(), BUFFER_SIZE);
+        assert_eq!(b.capacity(), BUFFER_SIZE);
+        assert_eq!(b.len(), 0);
 
         let ptr = b.as_mut_ptr() as usize;
         assert_eq!(
@@ -567,19 +697,22 @@ mod tests {
             BUFFER_ALIGN
         );
 
-        // Basic read/write sanity
-        b[0] = 0xAA;
-        b[BUFFER_SIZE - 1] = 0xBB;
-        assert_eq!(b[0], 0xAA);
-        assert_eq!(b[BUFFER_SIZE - 1], 0xBB);
+        // Basic read/write sanity using raw pointer (ignore logical len).
+        unsafe {
+            let s = std::slice::from_raw_parts_mut(b.as_mut_ptr(), b.capacity());
+            s[0] = 0xAA;
+            s[BUFFER_SIZE - 1] = 0xBB;
+            assert_eq!(s[0], 0xAA);
+            assert_eq!(s[BUFFER_SIZE - 1], 0xBB);
+        }
     }
 
     #[test]
     fn triple_buffer_initial_state_and_alignment() {
-        let (tb, mut writer_buf) = TripleBuffer::new();
+        let (writer, _reader, mut writer_buf) = triple_buffer();
 
         // Writer got a buffer
-        assert_eq!(writer_buf.len(), BUFFER_SIZE);
+        assert_eq!(writer_buf.capacity(), BUFFER_SIZE);
         assert_eq!(
             (writer_buf.as_mut_ptr() as usize) % BUFFER_ALIGN,
             0,
@@ -587,7 +720,7 @@ mod tests {
         );
 
         // Stats sanity
-        let st = tb.stats();
+        let st = writer.stats();
         assert_eq!(st.writer_idx, 0);
         assert_eq!(st.reader_idx, 1);
         assert_eq!(st.middle_idx, 2);
@@ -596,45 +729,45 @@ mod tests {
 
     #[test]
     fn async_publish_and_read_basic() {
-        let (tb, mut wbuf) = TripleBuffer::new();
+        let (mut writer, mut reader, mut wbuf) = triple_buffer();
 
         // Fill and publish; should be Ready immediately because middle is initially free.
         write_seq(&mut wbuf, 7);
-        let next_buf = poll_ready_once(tb.writer_publish(wbuf));
+        let next_buf = poll_ready_once(writer.publish(wbuf));
 
         // Reader should get it immediately.
-        let rbuf = poll_ready_once(tb.reader_next(None));
-        assert_eq!(read_seq(&rbuf), 7);
+        let mut rbuf = poll_ready_once(reader.next(None));
+        assert_eq!(read_seq(&mut rbuf), 7);
 
         // Publish again and read again with returning previous buffer
         let mut wbuf2 = next_buf;
         write_seq(&mut wbuf2, 9);
-        let next2 = poll_ready_once(tb.writer_publish(wbuf2));
+        let next2 = poll_ready_once(writer.publish(wbuf2));
 
-        let rbuf2 = poll_ready_once(tb.reader_next(Some(rbuf)));
-        assert_eq!(read_seq(&rbuf2), 9);
+        let mut rbuf2 = poll_ready_once(reader.next(Some(rbuf)));
+        assert_eq!(read_seq(&mut rbuf2), 9);
 
-        assert_eq!(next2.len(), BUFFER_SIZE);
+        assert_eq!(next2.capacity(), BUFFER_SIZE);
     }
 
     #[test]
     fn backpressure_pending_and_wakeup() {
-        let (tb, mut wbuf) = TripleBuffer::new();
+        let (mut writer, mut reader, mut wbuf) = triple_buffer();
 
         // First publish: immediate
         write_seq(&mut wbuf, 1);
-        let mut next = poll_ready_once(tb.writer_publish(wbuf));
+        let mut next = poll_ready_once(writer.publish(wbuf));
 
         // Second publish should pend until we read.
         write_seq(&mut next, 2);
-        let mut publish_fut = tb.writer_publish(next);
+        let mut publish_fut = writer.publish(next);
         let mut publish_fut = unsafe { Pin::new_unchecked(&mut publish_fut) };
 
         // First poll should pend; capture the wake flag.
         let writer_wake_flag = poll_pending_once(publish_fut.as_mut());
 
         // Now perform the read; this should wake the writer.
-        let _rbuf = poll_ready_once(tb.reader_next(None));
+        let _rbuf = poll_ready_once(reader.next(None));
 
         // Wait a bit for wake propagation.
         for _ in 0..1000 {
@@ -656,23 +789,22 @@ mod tests {
             std::task::Poll::Pending => panic!("publish should be ready after wake"),
         };
 
-        assert_eq!(buf_back.len(), BUFFER_SIZE);
+        assert_eq!(buf_back.capacity(), BUFFER_SIZE);
     }
 
     #[test]
     fn reader_pending_then_wakeup() {
         // Keep the writer-owned buffer so we can publish later.
-        let (tb, mut wbuf) = TripleBuffer::new();
+        let (mut writer, mut reader, mut wbuf) = triple_buffer();
 
         // Start reader before anything is published: should pend.
-        let mut read_fut = tb.reader_next(None);
+        let mut read_fut = reader.next(None);
         let mut read_fut = unsafe { Pin::new_unchecked(&mut read_fut) };
         let reader_wake_flag = poll_pending_once(read_fut.as_mut());
 
-        // Now publish using the initial writer buffer we got from `new()`.
+        // Now publish using the initial writer buffer we got from `triple_buffer_spsc()`.
         write_seq(&mut wbuf, 123);
-        let _writer_next_buf = poll_ready_once(tb.writer_publish(wbuf));
-        // We don’t need the returned writer buffer here; we just needed to publish once to wake the reader.
+        let _writer_next_buf = poll_ready_once(writer.publish(wbuf));
 
         // Wait for wake.
         for _ in 0..1000 {
@@ -689,26 +821,26 @@ mod tests {
         // Complete the read.
         let (waker, _) = thread_unpark_waker();
         let mut cx = Context::from_waker(&waker);
-        let rbuf = match read_fut.as_mut().poll(&mut cx) {
+        let mut rbuf = match read_fut.as_mut().poll(&mut cx) {
             std::task::Poll::Ready(b) => b,
             std::task::Poll::Pending => panic!("read should be ready after publish"),
         };
-        assert_eq!(read_seq(&rbuf), 123);
+        assert_eq!(read_seq(&mut rbuf), 123);
     }
 
     #[test]
     fn single_thread_event_loop_stress() {
-        let (tb, mut wbuf) = TripleBuffer::new();
+        let (mut writer, mut reader, mut wbuf) = triple_buffer();
         let mut prev_read: Option<AlignedBuffer> = None;
 
         const N: u64 = 10_000;
 
         for i in 0..N {
             write_seq(&mut wbuf, i);
-            wbuf = block_on(tb.writer_publish(wbuf));
+            wbuf = block_on(writer.publish(wbuf));
 
-            let rbuf = block_on(tb.reader_next(prev_read.take()));
-            let v = read_seq(&rbuf);
+            let mut rbuf = block_on(reader.next(prev_read.take()));
+            let v = read_seq(&mut rbuf);
             assert_eq!(v, i, "monotonic sequence mismatch at {}", i);
 
             prev_read = Some(rbuf);
@@ -717,21 +849,18 @@ mod tests {
 
     #[test]
     fn spsc_concurrent_stress() {
-        let (tb, mut wbuf) = TripleBuffer::new();
-        let tb_arc = Arc::new(tb);
-        let tb_w = tb_arc.clone();
-        let tb_r = tb_arc.clone();
+        let (mut writer, mut reader, mut wbuf) = triple_buffer();
 
         const N: u64 = 5000;
 
         // Reader thread
-        let reader = thread::spawn(move || {
+        let reader_thread = thread::spawn(move || {
             let mut prev: Option<AlignedBuffer> = None;
             let mut expected = 0u64;
 
             for _ in 0..N {
-                let buf = block_on(tb_r.reader_next(prev.take()));
-                let v = read_seq(&buf);
+                let mut buf = block_on(reader.next(prev.take()));
+                let v = read_seq(&mut buf);
                 assert_eq!(v, expected, "reader observed out-of-order value");
                 expected += 1;
                 prev = Some(buf);
@@ -739,30 +868,30 @@ mod tests {
         });
 
         // Writer thread
-        let writer = thread::spawn(move || {
+        let writer_thread = thread::spawn(move || {
             for i in 0..N {
                 write_seq(&mut wbuf, i);
-                wbuf = block_on(tb_w.writer_publish(wbuf));
+                wbuf = block_on(writer.publish(wbuf));
             }
         });
 
-        writer.join().unwrap();
-        reader.join().unwrap();
+        writer_thread.join().unwrap();
+        reader_thread.join().unwrap();
     }
 
     #[test]
     fn drop_with_in_flight_buffers_no_panic() {
-        // Publish one buffer; leave it unread; drop the TripleBuffer.
+        // Publish one buffer; leave it unread; drop the handles (and internal buffer).
         let mut buf_back = {
-            let (tb, mut wbuf) = TripleBuffer::new();
+            let (mut writer, _reader, mut wbuf) = triple_buffer();
             write_seq(&mut wbuf, 42);
-            let buf_back = poll_ready_once(tb.writer_publish(wbuf));
-            // tb dropped here; middle still holds unread data; drop must not panic or leak crash.
+            let buf_back = poll_ready_once(writer.publish(wbuf));
+            // writer and reader dropped here; middle still holds unread data; drop must not panic.
             buf_back
         };
 
         // The writer-owned buffer (buf_back) should be valid and aligned, and dropping it must be safe.
-        assert_eq!(buf_back.len(), BUFFER_SIZE);
+        assert_eq!(buf_back.capacity(), BUFFER_SIZE);
         assert_eq!(
             (buf_back.as_mut_ptr() as usize) % BUFFER_ALIGN,
             0,
@@ -773,20 +902,20 @@ mod tests {
 
     #[test]
     fn stats_progress() {
-        let (tb, mut wbuf) = TripleBuffer::new();
+        let (mut writer, mut reader, mut wbuf) = triple_buffer();
 
-        let s0 = tb.stats();
+        let s0 = writer.stats();
         assert_eq!(s0.generation, 0);
 
         // Publish
         write_seq(&mut wbuf, 1);
-        let _next = poll_ready_once(tb.writer_publish(wbuf));
-        let s1 = tb.stats();
+        let _next = poll_ready_once(writer.publish(wbuf));
+        let s1 = writer.stats();
         assert_eq!(s1.generation, 1);
 
         // Read
-        let _r = poll_ready_once(tb.reader_next(None));
-        let s2 = tb.stats();
+        let _r = poll_ready_once(reader.next(None));
+        let s2 = writer.stats();
         // generation stays at 1; last_read_gen is internal but middle is free now.
         assert_eq!(s2.generation, 1);
     }
