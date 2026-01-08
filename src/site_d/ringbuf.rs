@@ -23,6 +23,7 @@ use std::{
 
 use super::padding::CachePadded;
 use crate::blocking::block_on;
+use crate::hints::unlikely;
 
 /// Shared ring buffer state
 struct RingBufferShared<T> {
@@ -154,7 +155,8 @@ impl<T> Producer<T> {
         let read = self.cached_read;
 
         // Check if buffer appears full based on cached indices
-        if write.wrapping_sub(read) >= self.shared.capacity {
+        // Fast path: usually there's space (unlikely to be full)
+        if unlikely(write.wrapping_sub(read) >= self.shared.capacity) {
             // Update cached read index and check again
             self.cached_read = self.shared.read_index.load(Ordering::Acquire);
 
@@ -177,8 +179,8 @@ impl<T> Producer<T> {
             .write_index
             .store(self.cached_write, Ordering::Release);
 
-        // Wake consumer if waiting
-        if self.shared.consumer_waker_set.load(Ordering::Acquire) {
+        // Wake consumer if waiting (unlikely in hot path)
+        if unlikely(self.shared.consumer_waker_set.load(Ordering::Acquire)) {
             self.wake_consumer();
         }
 
@@ -220,7 +222,7 @@ impl<T> Producer<T> {
             .capacity
             .saturating_sub(write.wrapping_sub(read));
 
-        if available == 0 {
+        if unlikely(available == 0) {
             // Update cached read index and check again
             self.cached_read = self.shared.read_index.load(Ordering::Acquire);
             available = self
@@ -265,8 +267,8 @@ impl<T> Producer<T> {
             .write_index
             .store(self.cached_write, Ordering::Release);
 
-        // Wake consumer once if needed
-        if self.shared.consumer_waker_set.load(Ordering::Acquire) {
+        // Wake consumer once if needed (unlikely in hot path)
+        if unlikely(self.shared.consumer_waker_set.load(Ordering::Acquire)) {
             self.wake_consumer();
         }
 
@@ -391,7 +393,8 @@ impl<T> Consumer<T> {
         let write = self.cached_write;
 
         // Check if buffer appears empty based on cached indices
-        if read == write {
+        // Fast path: usually there's data (unlikely to be empty)
+        if unlikely(read == write) {
             // Update cached write index and check again
             self.cached_write = self.shared.write_index.load(Ordering::Acquire);
 
@@ -414,8 +417,8 @@ impl<T> Consumer<T> {
             .read_index
             .store(self.cached_read, Ordering::Release);
 
-        // Wake producer if waiting
-        if self.shared.producer_waker_set.load(Ordering::Acquire) {
+        // Wake producer if waiting (unlikely in hot path)
+        if unlikely(self.shared.producer_waker_set.load(Ordering::Acquire)) {
             self.wake_producer();
         }
 
@@ -449,7 +452,7 @@ impl<T> Consumer<T> {
         // Calculate available items
         let mut available = write.wrapping_sub(read);
 
-        if available == 0 {
+        if unlikely(available == 0) {
             // Update cached write index and check again
             self.cached_write = self.shared.write_index.load(Ordering::Acquire);
             available = self.cached_write.wrapping_sub(read);
@@ -491,8 +494,8 @@ impl<T> Consumer<T> {
             .read_index
             .store(self.cached_read, Ordering::Release);
 
-        // Wake producer once if needed
-        if self.shared.producer_waker_set.load(Ordering::Acquire) {
+        // Wake producer once if needed (unlikely in hot path)
+        if unlikely(self.shared.producer_waker_set.load(Ordering::Acquire)) {
             self.wake_producer();
         }
 
@@ -605,18 +608,24 @@ impl<'a, T> std::future::Future for PushFuture<'a, T> {
     type Output = ();
 
     fn poll(self: std::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // Use unsafe to project through the pin
         let this = unsafe { self.get_unchecked_mut() };
 
-        let value = this
-            .value
-            .take()
-            .expect("PushFuture polled after completion");
+        // Handle poll after completion gracefully
+        let Some(value) = this.value.take() else {
+            return Poll::Ready(());
+        };
 
+        // Fast path: try push without waker setup
         match this.producer.try_push(value) {
-            Ok(()) => Poll::Ready(()),
+            Ok(()) => return Poll::Ready(()),
             Err(v) => {
-                // Store waker for later wake-up
+                // Register waker BEFORE re-checking to avoid race condition:
+                // 1. try_push fails (buffer full)
+                // 2. consumer pops and calls wake_producer()
+                // 3. but waker wasn't set yet - wake is lost!
+                // 4. we set waker and return Pending - deadlock
+                //
+                // Fix: set waker first, then re-check
                 unsafe {
                     *this.producer.shared.producer_waker.get() = Some(cx.waker().clone());
                 }
@@ -625,10 +634,21 @@ impl<'a, T> std::future::Future for PushFuture<'a, T> {
                     .producer_waker_set
                     .store(true, Ordering::Release);
 
-                // Store value back for next poll
-                this.value = Some(v);
-
-                Poll::Pending
+                // Re-check after registering waker to close the race window
+                match this.producer.try_push(v) {
+                    Ok(()) => {
+                        // Clear waker flag since we succeeded
+                        this.producer
+                            .shared
+                            .producer_waker_set
+                            .store(false, Ordering::Relaxed);
+                        Poll::Ready(())
+                    }
+                    Err(v2) => {
+                        this.value = Some(v2);
+                        Poll::Pending
+                    }
+                }
             }
         }
     }
@@ -643,23 +663,33 @@ impl<'a, T> std::future::Future for PopFuture<'a, T> {
     type Output = T;
 
     fn poll(self: std::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // Use unsafe to project through the pin
         let this = unsafe { self.get_unchecked_mut() };
 
+        // Fast path: try pop without waker setup
+        if let Some(value) = this.consumer.try_pop() {
+            return Poll::Ready(value);
+        }
+
+        // Register waker BEFORE re-checking to avoid race condition
+        unsafe {
+            *this.consumer.shared.consumer_waker.get() = Some(cx.waker().clone());
+        }
+        this.consumer
+            .shared
+            .consumer_waker_set
+            .store(true, Ordering::Release);
+
+        // Re-check after registering waker to close the race window
         match this.consumer.try_pop() {
-            Some(value) => Poll::Ready(value),
-            None => {
-                // Store waker for later wake-up
-                unsafe {
-                    *this.consumer.shared.consumer_waker.get() = Some(cx.waker().clone());
-                }
+            Some(value) => {
+                // Clear waker flag since we succeeded
                 this.consumer
                     .shared
                     .consumer_waker_set
-                    .store(true, Ordering::Release);
-
-                Poll::Pending
+                    .store(false, Ordering::Relaxed);
+                Poll::Ready(value)
             }
+            None => Poll::Pending,
         }
     }
 }
@@ -677,7 +707,7 @@ impl<'a, T: Copy> std::future::Future for PushSliceFuture<'a, T> {
     fn poll(self: std::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = unsafe { self.get_unchecked_mut() };
 
-        // Try to push remaining items
+        // Fast path: try to push remaining items
         let remaining = &this.items[this.pushed_so_far..];
         let pushed = this.producer.try_push_slice(remaining);
 
@@ -685,12 +715,11 @@ impl<'a, T: Copy> std::future::Future for PushSliceFuture<'a, T> {
             this.pushed_so_far += pushed;
 
             if this.pushed_so_far == this.items.len() {
-                // All items pushed
                 return Poll::Ready(());
             }
         }
 
-        // Register waker for when space becomes available
+        // Register waker BEFORE re-checking to avoid race condition
         unsafe {
             *this.producer.shared.producer_waker.get() = Some(cx.waker().clone());
         }
@@ -698,6 +727,22 @@ impl<'a, T: Copy> std::future::Future for PushSliceFuture<'a, T> {
             .shared
             .producer_waker_set
             .store(true, Ordering::Release);
+
+        // Re-check after registering waker to close the race window
+        let remaining = &this.items[this.pushed_so_far..];
+        let pushed = this.producer.try_push_slice(remaining);
+
+        if pushed > 0 {
+            this.pushed_so_far += pushed;
+
+            if this.pushed_so_far == this.items.len() {
+                this.producer
+                    .shared
+                    .producer_waker_set
+                    .store(false, Ordering::Relaxed);
+                return Poll::Ready(());
+            }
+        }
 
         Poll::Pending
     }
@@ -716,7 +761,7 @@ impl<'a, T: Copy> std::future::Future for PopSliceFuture<'a, T> {
     fn poll(self: std::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = unsafe { self.get_unchecked_mut() };
 
-        // Try to pop remaining items
+        // Fast path: try to pop remaining items
         let remaining = &mut this.items[this.popped_so_far..];
         let popped = this.consumer.try_pop_slice(remaining);
 
@@ -724,12 +769,11 @@ impl<'a, T: Copy> std::future::Future for PopSliceFuture<'a, T> {
             this.popped_so_far += popped;
 
             if this.popped_so_far == this.items.len() {
-                // All items popped
                 return Poll::Ready(());
             }
         }
 
-        // Register waker for when data becomes available
+        // Register waker BEFORE re-checking to avoid race condition
         unsafe {
             *this.consumer.shared.consumer_waker.get() = Some(cx.waker().clone());
         }
@@ -737,6 +781,22 @@ impl<'a, T: Copy> std::future::Future for PopSliceFuture<'a, T> {
             .shared
             .consumer_waker_set
             .store(true, Ordering::Release);
+
+        // Re-check after registering waker to close the race window
+        let remaining = &mut this.items[this.popped_so_far..];
+        let popped = this.consumer.try_pop_slice(remaining);
+
+        if popped > 0 {
+            this.popped_so_far += popped;
+
+            if this.popped_so_far == this.items.len() {
+                this.consumer
+                    .shared
+                    .consumer_waker_set
+                    .store(false, Ordering::Relaxed);
+                return Poll::Ready(());
+            }
+        }
 
         Poll::Pending
     }
