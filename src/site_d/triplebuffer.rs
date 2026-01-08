@@ -1,6 +1,3 @@
-use futures::task::AtomicWaker;
-#[cfg(feature = "monoio-0_2")]
-use monoio::buf::{IoBuf, IoBufMut};
 use std::{
     alloc::{Layout, alloc_zeroed, dealloc},
     cell::Cell,
@@ -16,8 +13,14 @@ use std::{
     task::{Context, Poll},
 };
 
-use crate::hints::{likely, unlikely};
-use crate::site_d::padding::CachePadded;
+use futures::task::AtomicWaker;
+#[cfg(feature = "monoio-0_2")]
+use monoio::buf::{IoBuf, IoBufMut};
+
+use crate::{
+    hints::{likely, unlikely},
+    site_d::padding::CachePadded,
+};
 
 /// 4 MiB buffer size optimized for NVMe and O_DIRECT
 pub const BUFFER_SIZE: usize = 4 * 1024 * 1024;
@@ -27,7 +30,8 @@ pub const BUFFER_ALIGN: usize = 4096;
 ///
 /// - Allocates with alignment `BUFFER_ALIGN`.
 /// - Deallocates with the same alignment (no UB).
-/// - Can be converted to/from a raw data pointer to circulate through atomics without extra heap allocations.
+/// - Can be converted to/from a raw data pointer to circulate through atomics
+///   without extra heap allocations.
 pub struct AlignedBuffer {
     ptr: NonNull<u8>,
     len: usize,
@@ -80,8 +84,8 @@ impl AlignedBuffer {
     ///
     /// # Safety
     ///
-    /// `ptr` must be produced by `AlignedBuffer::into_raw` and refer to a buffer
-    /// with `cap == BUFFER_SIZE`. `len` must be <= `BUFFER_SIZE`.
+    /// `ptr` must be produced by `AlignedBuffer::into_raw` and refer to a
+    /// buffer with `cap == BUFFER_SIZE`. `len` must be <= `BUFFER_SIZE`.
     pub unsafe fn from_raw_with_len(ptr: *mut u8, len: usize) -> Self {
         debug_assert!(!ptr.is_null());
         debug_assert_eq!((ptr as usize) % BUFFER_ALIGN, 0);
@@ -172,7 +176,8 @@ struct Waiters {
 ///
 /// Hidden from public API; accessed only via TripleBufWriter/TripleBufReader.
 struct TripleBuffer {
-    // Three buffer data pointers; at most one slot can be null (held out-of-structure by writer or reader).
+    // Three buffer data pointers; at most one slot can be null (held out-of-structure by writer or
+    // reader).
     buffers: [AtomicPtr<u8>; 3],
     // Lengths of the buffers in each slot.
     lens: [AtomicUsize; 3],
@@ -191,7 +196,8 @@ struct TripleBuffer {
 }
 
 impl TripleBuffer {
-    /// Create a new triple buffer and return it along with the initial writer-owned buffer.
+    /// Create a new triple buffer and return it along with the initial
+    /// writer-owned buffer.
     fn new() -> (Self, AlignedBuffer) {
         let b0 = AlignedBuffer::new();
         let b1 = AlignedBuffer::new();
@@ -335,7 +341,8 @@ impl TripleBuffer {
     /// Precondition: `has_unread()` must be true (checked by async wrapper).
     #[inline(always)]
     fn reader_take_now(&self, previous: Option<AlignedBuffer>) -> AlignedBuffer {
-        // Observe current generation; we will commit it after removing the middle buffer
+        // Observe current generation; we will commit it after removing the middle
+        // buffer
         let generation = self
             .shared_state
             .as_ref()
@@ -376,7 +383,8 @@ impl TripleBuffer {
 
         let buf = unsafe { AlignedBuffer::from_raw_with_len(ptr, published_len) };
 
-        // Commit: mark this generation as read only after we've removed the buffer from the middle
+        // Commit: mark this generation as read only after we've removed the buffer from
+        // the middle
         self.shared_state
             .as_ref()
             .last_read_gen
@@ -416,7 +424,8 @@ impl Drop for TripleBuffer {
             for i in 0..3 {
                 let ptr = self.buffers[i].load(Ordering::Relaxed);
                 if !ptr.is_null() {
-                    // Reconstruct and drop; safe because these were produced by AlignedBuffer::into_raw
+                    // Reconstruct and drop; safe because these were produced by
+                    // AlignedBuffer::into_raw
                     let _ = AlignedBuffer::from_raw_with_len(ptr, 0);
                 }
             }
@@ -462,7 +471,8 @@ impl TripleBufWriter {
     /// Publish `buf` when the reader has consumed the previous data.
     /// Never drops/overwrites unread data.
     ///
-    /// Requires `&mut self` so only one publish future can exist at a time per writer.
+    /// Requires `&mut self` so only one publish future can exist at a time per
+    /// writer.
     pub fn publish<'a>(&'a mut self, buf: AlignedBuffer) -> WriterPublish<'a> {
         WriterPublish {
             tb: &self.inner,
@@ -477,9 +487,11 @@ impl TripleBufWriter {
 }
 
 impl TripleBufReader {
-    /// Yield the next available buffer. If `previous` is Some, it is returned to the pool.
+    /// Yield the next available buffer. If `previous` is Some, it is returned
+    /// to the pool.
     ///
-    /// Requires `&mut self` so only one read future can exist at a time per reader.
+    /// Requires `&mut self` so only one read future can exist at a time per
+    /// reader.
     pub fn next<'a>(&'a mut self, previous: Option<AlignedBuffer>) -> ReaderNext<'a> {
         ReaderNext {
             tb: &self.inner,
@@ -572,13 +584,18 @@ pub struct BufferStats {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        pin::Pin,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering as AO},
+        },
+        task::{Context, Waker},
+        thread,
+        time::Duration,
+    };
+
     use super::*;
-    use std::pin::Pin;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering as AO};
-    use std::task::{Context, Waker};
-    use std::thread;
-    use std::time::Duration;
 
     // ----------------------------
     // Test utilities
@@ -586,9 +603,13 @@ mod tests {
 
     // A waker that unparks the current thread and flips a flag on wake.
     fn thread_unpark_waker() -> (Waker, Arc<std::sync::atomic::AtomicBool>) {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, Ordering as AO};
-        use std::task::{RawWaker, RawWakerVTable, Waker};
+        use std::{
+            sync::{
+                Arc,
+                atomic::{AtomicBool, Ordering as AO},
+            },
+            task::{RawWaker, RawWakerVTable, Waker},
+        };
 
         unsafe fn clone(data: *const ()) -> RawWaker {
             let arc = unsafe { Arc::<AtomicBool>::from_raw(data as *const AtomicBool) };
@@ -652,7 +673,8 @@ mod tests {
         }
     }
 
-    // Poll once and expect Pending. Returns the wake flag so the caller can observe wakeups.
+    // Poll once and expect Pending. Returns the wake flag so the caller can observe
+    // wakeups.
     fn poll_pending_once<F: std::future::Future>(mut fut: Pin<&mut F>) -> Arc<AtomicBool> {
         let (waker, flag) = thread_unpark_waker();
         let mut cx = Context::from_waker(&waker);
@@ -731,7 +753,8 @@ mod tests {
     fn async_publish_and_read_basic() {
         let (mut writer, mut reader, mut wbuf) = triple_buffer();
 
-        // Fill and publish; should be Ready immediately because middle is initially free.
+        // Fill and publish; should be Ready immediately because middle is initially
+        // free.
         write_seq(&mut wbuf, 7);
         let next_buf = poll_ready_once(writer.publish(wbuf));
 
@@ -802,7 +825,8 @@ mod tests {
         let mut read_fut = unsafe { Pin::new_unchecked(&mut read_fut) };
         let reader_wake_flag = poll_pending_once(read_fut.as_mut());
 
-        // Now publish using the initial writer buffer we got from `triple_buffer_spsc()`.
+        // Now publish using the initial writer buffer we got from
+        // `triple_buffer_spsc()`.
         write_seq(&mut wbuf, 123);
         let _writer_next_buf = poll_ready_once(writer.publish(wbuf));
 
@@ -886,11 +910,13 @@ mod tests {
             let (mut writer, _reader, mut wbuf) = triple_buffer();
             write_seq(&mut wbuf, 42);
             let buf_back = poll_ready_once(writer.publish(wbuf));
-            // writer and reader dropped here; middle still holds unread data; drop must not panic.
+            // writer and reader dropped here; middle still holds unread data; drop must not
+            // panic.
             buf_back
         };
 
-        // The writer-owned buffer (buf_back) should be valid and aligned, and dropping it must be safe.
+        // The writer-owned buffer (buf_back) should be valid and aligned, and dropping
+        // it must be safe.
         assert_eq!(buf_back.capacity(), BUFFER_SIZE);
         assert_eq!(
             (buf_back.as_mut_ptr() as usize) % BUFFER_ALIGN,

@@ -22,8 +22,7 @@ use std::{
 };
 
 use super::padding::CachePadded;
-use crate::blocking::block_on;
-use crate::hints::unlikely;
+use crate::{blocking::block_on, hints::unlikely};
 
 /// Shared ring buffer state
 struct RingBufferShared<T> {
@@ -617,7 +616,7 @@ impl<'a, T> std::future::Future for PushFuture<'a, T> {
 
         // Fast path: try push without waker setup
         match this.producer.try_push(value) {
-            Ok(()) => return Poll::Ready(()),
+            Ok(()) => Poll::Ready(()),
             Err(v) => {
                 // Register waker BEFORE re-checking to avoid race condition:
                 // 1. try_push fails (buffer full)

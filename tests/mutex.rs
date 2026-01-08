@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{rc::Rc, time::Duration};
 
 use cynosure::site_c::mutex::LocalMutex;
 
@@ -34,7 +34,7 @@ async fn test_try_lock() {
 
 #[monoio::test(timer_enabled = true)]
 async fn test_multiple_waiters() {
-    let mutex = LocalMutex::new(0);
+    let mutex = Rc::new(LocalMutex::new(0));
     let mutex_clone1 = mutex.clone();
     let mutex_clone2 = mutex.clone();
 
@@ -82,7 +82,7 @@ async fn test_hold_across_await() {
 
 #[monoio::test(timer_enabled = true)]
 async fn test_mutex_contention() {
-    let counter = LocalMutex::new(0);
+    let counter = Rc::new(LocalMutex::new(0));
     let mut handles = vec![];
 
     for _ in 0..10 {
