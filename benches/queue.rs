@@ -587,11 +587,41 @@ fn bench_realistic_usage(c: &mut Criterion) {
     group.finish();
 }
 
+// `retain` (used by the site_c lock waiter queues for cancellation cleanup).
+fn bench_retain(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Queue Retain");
+    for &keep_ratio in &[0usize, 1, 2] {
+        // 0 = remove all, 1 = remove ~half, 2 = keep all
+        group.bench_function(format!("retain_inline/keep_mod{keep_ratio}"), |b| {
+            b.iter_batched(
+                || {
+                    let mut q = Queue::<i32, 8>::new();
+                    for i in 0..8 {
+                        q.push_back(i);
+                    }
+                    q
+                },
+                |mut q| {
+                    q.retain(|&v| match keep_ratio {
+                        0 => false,
+                        1 => v % 2 == 0,
+                        _ => true,
+                    });
+                    black_box(q.len())
+                },
+                criterion::BatchSize::SmallInput,
+            )
+        });
+    }
+    group.finish();
+}
+
 // Define the benchmark group
 criterion_group!(
     benches,
     bench_queue_ops,
     bench_comparison,
     bench_realistic_usage,
+    bench_retain,
 );
 criterion_main!(benches);

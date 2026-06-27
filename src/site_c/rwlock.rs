@@ -31,9 +31,14 @@ use crate::hints::likely;
 ///
 /// # Fairness
 ///
-/// This implementation is **write-preferring**: when a writer releases the
-/// lock, waiting writers are woken before waiting readers. This prevents writer
-/// starvation and matches the behavior of `parking_lot` and `tokio`.
+/// This implementation is **write-preferring**, like `parking_lot`: while a
+/// writer is queued, new `read().await` acquisitions defer to it (and on
+/// release a waiting writer is woken before any readers), so writers are not
+/// starved by a stream of readers. The trade-off is that readers may be starved
+/// under a continuous stream of writers. The non-blocking [`try_read`] remains
+/// opportunistic and ignores queued writers.
+///
+/// [`try_read`]: LocalRwLock::try_read
 ///
 /// # Example
 ///
@@ -69,8 +74,12 @@ use crate::hints::likely;
 pub struct LocalRwLock<T> {
     readers: Cell<usize>,
     writer: Cell<bool>,
-    read_waiters: UnsafeCell<Queue<Waker, 8>>,
-    write_waiters: UnsafeCell<Queue<Waker, 8>>,
+    // `(id, waker)`: the `id` is a per-future token (NOT the waker), so a
+    // future's entry can be removed unambiguously even when two futures of this
+    // lock are driven by one task (and thus share a waker).
+    read_waiters: UnsafeCell<Queue<(u64, Waker), 8>>,
+    write_waiters: UnsafeCell<Queue<(u64, Waker), 8>>,
+    next_id: Cell<u64>,
     value: UnsafeCell<T>,
 }
 
@@ -83,6 +92,7 @@ impl<T> LocalRwLock<T> {
             writer: Cell::new(false),
             read_waiters: UnsafeCell::new(Queue::new()),
             write_waiters: UnsafeCell::new(Queue::new()),
+            next_id: Cell::new(0),
             value: UnsafeCell::new(value),
         }
     }
@@ -94,7 +104,10 @@ impl<T> LocalRwLock<T> {
     /// becomes available for reading.
     #[inline]
     pub fn read(&self) -> LocalRwLockReadFuture<'_, T> {
-        LocalRwLockReadFuture { rwlock: self }
+        LocalRwLockReadFuture {
+            rwlock: self,
+            registered: None,
+        }
     }
 
     /// Acquires a write lock asynchronously.
@@ -105,15 +118,37 @@ impl<T> LocalRwLock<T> {
     /// available for writing.
     #[inline]
     pub fn write(&self) -> LocalRwLockWriteFuture<'_, T> {
-        LocalRwLockWriteFuture { rwlock: self }
+        LocalRwLockWriteFuture {
+            rwlock: self,
+            registered: None,
+        }
     }
 
     /// Attempts to acquire a read lock without waiting.
     ///
     /// Returns `Some(guard)` if successful, `None` if a writer holds the lock.
+    ///
+    /// This is *opportunistic*: it succeeds whenever no writer is active, even
+    /// if a writer is queued. The async [`read`](Self::read) path, by contrast,
+    /// is write-preferring and defers to queued writers.
     #[inline]
     pub fn try_read(&self) -> Option<LocalRwLockReadGuard<'_, T>> {
         if likely(!self.writer.get()) {
+            self.readers.set(self.readers.get() + 1);
+            Some(LocalRwLockReadGuard { rwlock: self })
+        } else {
+            None
+        }
+    }
+
+    /// Write-preferring read acquisition used by the async `read()` future:
+    /// succeeds only if no writer is active AND none is queued, so a waiting
+    /// writer is not starved by a stream of new readers.
+    #[inline]
+    fn try_read_fair(&self) -> Option<LocalRwLockReadGuard<'_, T>> {
+        // SAFETY: single-threaded; transient borrow.
+        let no_writer_queued = unsafe { (*self.write_waiters.get()).is_empty() };
+        if !self.writer.get() && no_writer_queued {
             self.readers.set(self.readers.get() + 1);
             Some(LocalRwLockReadGuard { rwlock: self })
         } else {
@@ -167,63 +202,93 @@ impl<T> LocalRwLock<T> {
         self.value.get_mut()
     }
 
-    /// Releases a read lock and potentially wakes a waiting writer.
+    /// Releases a read lock.
     #[inline]
     fn release_read(&self) {
         let readers = self.readers.get();
         debug_assert!(readers > 0, "release_read called with no readers");
         self.readers.set(readers - 1);
-
-        // If no more readers, wake one waiting writer
-        if readers == 1 {
-            // SAFETY: Single-threaded context, no concurrent access.
-            if let Some(waker) = unsafe { (*self.write_waiters.get()).pop_front() } {
-                waker.wake();
-            }
-        }
+        self.wake_next();
     }
 
-    /// Releases a write lock and wakes a waiting writer or all readers.
+    /// Releases a write lock.
     #[inline]
     fn release_write(&self) {
         debug_assert!(self.writer.get(), "release_write called without write lock");
         self.writer.set(false);
-
-        // Write-preferring: wake one writer first, otherwise all readers.
-        // This prevents writer starvation and matches parking_lot/tokio behavior.
-        // SAFETY: Single-threaded context, no concurrent access.
-        unsafe {
-            if let Some(waker) = (*self.write_waiters.get()).pop_front() {
-                waker.wake();
-            } else {
-                let read_waiters = &mut *self.read_waiters.get();
-                while let Some(waker) = read_waiters.pop_front() {
-                    waker.wake();
-                }
-            }
-        }
+        self.wake_next();
     }
 
-    /// Registers a waker to be notified when read access becomes available.
-    fn register_read_waker(&self, waker: &Waker) {
-        // SAFETY: Single-threaded context, no concurrent access.
-        unsafe {
-            let waiters = &mut *self.read_waiters.get();
-            if !waiters.iter().any(|w| w.will_wake(waker)) {
-                waiters.push_back(waker.clone());
-            }
+    /// Wakes the next eligible waiter(s), but only if the lock is fully free.
+    ///
+    /// Write-preferring: a single waiting writer is woken if any; otherwise all
+    /// waiting readers are woken (they can share). Called on every release and
+    /// on cancellation of a pending future, so a cancelled-but-notified waiter
+    /// passes the turn to the next one. Because cancelled futures deregister
+    /// their wakers, a non-empty `write_waiters` always means a *live* writer is
+    /// queued.
+    #[inline]
+    fn wake_next(&self) {
+        if self.writer.get() || self.readers.get() > 0 {
+            return; // lock still held; the holder(s) will wake on release
+        }
+        // SAFETY: single-threaded; each borrow lives only for its pop, so no
+        // borrow is held across the re-entrant `wake()` callback.
+        let next_writer = unsafe { (*self.write_waiters.get()).pop_front() };
+        if let Some((_, waker)) = next_writer {
+            waker.wake();
+            return;
+        }
+        loop {
+            let next = unsafe { (*self.read_waiters.get()).pop_front() };
+            let Some((_, waker)) = next else { break };
+            waker.wake();
         }
     }
+}
 
-    /// Registers a waker to be notified when write access becomes available.
-    fn register_write_waker(&self, waker: &Waker) {
-        // SAFETY: Single-threaded context, no concurrent access.
-        unsafe {
-            let waiters = &mut *self.write_waiters.get();
-            if !waiters.iter().any(|w| w.will_wake(waker)) {
-                waiters.push_back(waker.clone());
-            }
+/// Registers (or refreshes) a future's `(id, waker)` in `cell`, tracking it in
+/// `slot` so exactly that future's entry can be removed on cancellation. Keeps
+/// at most one entry per live future, so no stale (cancelled) wakers accumulate
+/// and a non-empty queue reliably means a live waiter. The `id` (not the waker)
+/// is the identity, so two futures of this lock sharing one task's waker get
+/// distinct, independently-removable entries.
+fn register_in(
+    cell: &UnsafeCell<Queue<(u64, Waker), 8>>,
+    next_id: &Cell<u64>,
+    slot: &mut Option<(u64, Waker)>,
+    waker: &Waker,
+) {
+    // SAFETY: single-threaded; no borrow held across a callback.
+    let q = unsafe { &mut *cell.get() };
+    // Fast path: skip re-registering only if our entry is *still queued* with an
+    // equivalent waker. (`wake_next` pops the woken entry, so after a
+    // wake-then-barge we must fall through and re-add it.)
+    if let Some((id, w)) = slot.as_ref()
+        && w.will_wake(waker)
+        && q.iter().any(|(qid, _)| qid == id)
+    {
+        return;
+    }
+    let id = match slot {
+        Some((id, _)) => *id,
+        None => {
+            let id = next_id.get();
+            next_id.set(id.wrapping_add(1));
+            id
         }
+    };
+    q.retain(|(qid, _)| *qid != id);
+    q.push_back((id, waker.clone()));
+    *slot = Some((id, waker.clone()));
+}
+
+/// Removes a future's entry from `cell` (on cancel/acquire).
+fn deregister_in(cell: &UnsafeCell<Queue<(u64, Waker), 8>>, slot: &mut Option<(u64, Waker)>) {
+    if let Some((id, _)) = slot.take() {
+        // SAFETY: single-threaded; no borrow held across a callback.
+        let q = unsafe { &mut *cell.get() };
+        q.retain(|(qid, _)| *qid != id);
     }
 }
 
@@ -254,6 +319,8 @@ impl<T: std::fmt::Debug> std::fmt::Debug for LocalRwLock<T> {
 /// Future returned by [`LocalRwLock::read()`].
 pub struct LocalRwLockReadFuture<'a, T> {
     rwlock: &'a LocalRwLock<T>,
+    /// `(id, waker)` entry in `read_waiters`, tracked for removal on cancel.
+    registered: Option<(u64, Waker)>,
 }
 
 impl<'a, T> Future for LocalRwLockReadFuture<'a, T> {
@@ -261,19 +328,35 @@ impl<'a, T> Future for LocalRwLockReadFuture<'a, T> {
 
     #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // Fast path
-        if let Some(guard) = self.rwlock.try_read() {
+        let this = self.get_mut(); // future is Unpin
+
+        // Fast path (write-preferring: defers to queued writers).
+        if let Some(guard) = this.rwlock.try_read_fair() {
+            deregister_in(&this.rwlock.read_waiters, &mut this.registered);
             return Poll::Ready(guard);
         }
 
-        // Register waker BEFORE re-checking to avoid race condition
-        self.rwlock.register_read_waker(cx.waker());
-
-        // Re-check after registering
-        if let Some(guard) = self.rwlock.try_read() {
+        // Register, then re-check.
+        register_in(
+            &this.rwlock.read_waiters,
+            &this.rwlock.next_id,
+            &mut this.registered,
+            cx.waker(),
+        );
+        if let Some(guard) = this.rwlock.try_read_fair() {
+            deregister_in(&this.rwlock.read_waiters, &mut this.registered);
             Poll::Ready(guard)
         } else {
             Poll::Pending
+        }
+    }
+}
+
+impl<'a, T> Drop for LocalRwLockReadFuture<'a, T> {
+    fn drop(&mut self) {
+        if self.registered.is_some() {
+            deregister_in(&self.rwlock.read_waiters, &mut self.registered);
+            self.rwlock.wake_next();
         }
     }
 }
@@ -289,6 +372,8 @@ impl<'a, T> std::fmt::Debug for LocalRwLockReadFuture<'a, T> {
 /// Future returned by [`LocalRwLock::write()`].
 pub struct LocalRwLockWriteFuture<'a, T> {
     rwlock: &'a LocalRwLock<T>,
+    /// `(id, waker)` entry in `write_waiters`, tracked for removal on cancel.
+    registered: Option<(u64, Waker)>,
 }
 
 impl<'a, T> Future for LocalRwLockWriteFuture<'a, T> {
@@ -296,19 +381,35 @@ impl<'a, T> Future for LocalRwLockWriteFuture<'a, T> {
 
     #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut(); // future is Unpin
+
         // Fast path
-        if let Some(guard) = self.rwlock.try_write() {
+        if let Some(guard) = this.rwlock.try_write() {
+            deregister_in(&this.rwlock.write_waiters, &mut this.registered);
             return Poll::Ready(guard);
         }
 
-        // Register waker BEFORE re-checking to avoid race condition
-        self.rwlock.register_write_waker(cx.waker());
-
-        // Re-check after registering
-        if let Some(guard) = self.rwlock.try_write() {
+        // Register, then re-check.
+        register_in(
+            &this.rwlock.write_waiters,
+            &this.rwlock.next_id,
+            &mut this.registered,
+            cx.waker(),
+        );
+        if let Some(guard) = this.rwlock.try_write() {
+            deregister_in(&this.rwlock.write_waiters, &mut this.registered);
             Poll::Ready(guard)
         } else {
             Poll::Pending
+        }
+    }
+}
+
+impl<'a, T> Drop for LocalRwLockWriteFuture<'a, T> {
+    fn drop(&mut self) {
+        if self.registered.is_some() {
+            deregister_in(&self.rwlock.write_waiters, &mut self.registered);
+            self.rwlock.wake_next();
         }
     }
 }
@@ -698,5 +799,159 @@ mod tests {
         }
 
         assert_eq!(*lock.try_read().unwrap(), 100);
+    }
+
+    // --- cancellation / fairness regression tests ---
+
+    use std::sync::atomic::{AtomicBool, Ordering as AO};
+
+    struct FlagWaker(std::sync::Arc<AtomicBool>);
+    impl Wake for FlagWaker {
+        fn wake(self: std::sync::Arc<Self>) {
+            self.0.store(true, AO::SeqCst);
+        }
+        fn wake_by_ref(self: &std::sync::Arc<Self>) {
+            self.0.store(true, AO::SeqCst);
+        }
+    }
+    fn flag_waker() -> (Waker, std::sync::Arc<AtomicBool>) {
+        let f = std::sync::Arc::new(AtomicBool::new(false));
+        (std::sync::Arc::new(FlagWaker(f.clone())).into(), f)
+    }
+    fn poll_with(fut: &mut (impl Future + Unpin), w: &Waker) -> Poll<()> {
+        let mut cx = Context::from_waker(w);
+        Pin::new(fut).poll(&mut cx).map(|_| ())
+    }
+
+    /// Regression for the writer-cancellation deadlock: a cancelled queued
+    /// writer no longer strands a live one — its waker is removed on drop, so
+    /// release wakes the live writer.
+    #[test]
+    fn rwlock_writer_cancellation_recovers() {
+        let lock = LocalRwLock::new(0i32);
+        let r = lock.try_read().unwrap(); // readers = 1
+
+        // W1 registers, then is cancelled (dropped) -> its waker is removed.
+        let (w1_waker, _w1) = flag_waker();
+        {
+            let mut w1 = lock.write();
+            assert!(poll_with(&mut w1, &w1_waker).is_pending());
+        }
+
+        // W2 registers and stays live.
+        let (w2_waker, w2_flag) = flag_waker();
+        let mut w2 = lock.write();
+        assert!(poll_with(&mut w2, &w2_waker).is_pending());
+
+        drop(r); // release: must wake the live W2 (not the removed W1)
+        assert!(
+            w2_flag.load(AO::SeqCst),
+            "live writer W2 must be woken after the read lock is released"
+        );
+        // And W2 can now acquire.
+        match poll_with(&mut w2, &w2_waker) {
+            Poll::Ready(()) => {}
+            Poll::Pending => panic!("W2 should acquire the now-free lock"),
+        }
+    }
+
+    /// If every woken writer is cancelled, the turn passes through to waiting
+    /// readers (torch-passing on drop), so readers aren't stranded.
+    #[test]
+    fn rwlock_cancelled_writer_passes_turn_to_readers() {
+        let lock = LocalRwLock::new(0i32);
+        let r = lock.try_read().unwrap();
+
+        // One queued writer and one queued reader (reader defers, write-pref).
+        let (ww, _wf) = flag_waker();
+        let mut w = lock.write();
+        assert!(poll_with(&mut w, &ww).is_pending());
+
+        let (rw, r_flag) = flag_waker();
+        let mut rd = lock.read();
+        assert!(poll_with(&mut rd, &rw).is_pending());
+
+        drop(r); // wakes the writer W
+        // Now cancel the writer before it acquires; its drop must pass the turn
+        // to the waiting reader.
+        drop(w);
+        assert!(
+            r_flag.load(AO::SeqCst),
+            "reader must be woken once the only writer is cancelled"
+        );
+    }
+
+    /// Write-preferring: a new `read().await` defers while a writer is queued.
+    #[test]
+    fn rwlock_read_defers_to_queued_writer() {
+        let lock = LocalRwLock::new(0i32);
+        let _r = lock.try_read().unwrap(); // a reader holds
+
+        let (ww, _wf) = flag_waker();
+        let mut w = lock.write();
+        assert!(poll_with(&mut w, &ww).is_pending()); // writer queued
+
+        // A new async reader must NOT jump ahead of the queued writer.
+        let (rw, _rf) = flag_waker();
+        let mut rd = lock.read();
+        assert!(
+            poll_with(&mut rd, &rw).is_pending(),
+            "read().await must defer to a queued writer (write-preferring)"
+        );
+        // ...though the opportunistic try_read still succeeds.
+        assert!(lock.try_read().is_some());
+    }
+
+    /// Two writer futures of the SAME lock driven by ONE task (shared waker):
+    /// when the first acquires and deregisters, the second must NOT be stranded.
+    #[test]
+    fn rwlock_two_writers_one_task_both_progress() {
+        let lock = LocalRwLock::new(0i32);
+        let g = lock.try_write().unwrap();
+        let (w, flag) = flag_waker();
+        let mut cx = Context::from_waker(&w);
+
+        let mut f1 = std::pin::pin!(lock.write());
+        let mut f2 = std::pin::pin!(lock.write());
+        assert!(f1.as_mut().poll(&mut cx).is_pending());
+        assert!(f2.as_mut().poll(&mut cx).is_pending());
+
+        drop(g);
+        let g1 = match f1.as_mut().poll(&mut cx) {
+            Poll::Ready(g) => g,
+            Poll::Pending => panic!("f1 should acquire after unlock"),
+        };
+        assert!(f2.as_mut().poll(&mut cx).is_pending());
+
+        flag.store(false, AO::SeqCst);
+        drop(g1);
+        assert!(
+            flag.load(AO::SeqCst),
+            "f2 writer must be woken on release (shared-waker stranding)"
+        );
+    }
+
+    /// A woken (and popped) writer that is then barged by a new writer must be
+    /// re-queued on its next poll, not dropped from the queue.
+    #[test]
+    fn rwlock_woken_then_barged_writer_requeued() {
+        let lock = LocalRwLock::new(0i32);
+        let g = lock.try_write().unwrap();
+        let (w, flag) = flag_waker();
+        let mut cx = Context::from_waker(&w);
+
+        let mut f = std::pin::pin!(lock.write());
+        assert!(f.as_mut().poll(&mut cx).is_pending());
+
+        drop(g); // wakes f (pops it)
+        let g2 = lock.try_write().unwrap(); // barge
+        assert!(f.as_mut().poll(&mut cx).is_pending()); // must re-register
+
+        flag.store(false, AO::SeqCst);
+        drop(g2);
+        assert!(
+            flag.load(AO::SeqCst),
+            "woken-then-barged writer must be re-queued and re-woken"
+        );
     }
 }

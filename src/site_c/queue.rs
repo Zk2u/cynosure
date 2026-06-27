@@ -383,11 +383,27 @@ impl<T, const N: usize> Queue<T, N> {
                 }
 
                 *head = 0;
-                *tail = *len;
+                // When the buffer is full, `tail` must wrap to 0 (the
+                // head == tail full convention). Leaving it at `N` would make
+                // the next `push_back` index `buf[N]`, which is out of bounds.
+                *tail = if *len == N { 0 } else { *len };
 
                 unsafe { std::slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut T, *len) }
             }
             QueueInternal::Heap(vec) => vec.make_contiguous(),
+        }
+    }
+
+    /// Retains only the elements for which `keep` returns `true`, preserving
+    /// their relative order.
+    pub fn retain(&mut self, mut keep: impl FnMut(&T) -> bool) {
+        // Drain into a Vec (resets the queue to empty), then push back the kept
+        // elements in order. Reuses the tested drain/push paths rather than
+        // hand-rolling another circular-buffer mutation.
+        for item in self.into_vec() {
+            if keep(&item) {
+                self.push_back(item);
+            }
         }
     }
 
@@ -1457,6 +1473,28 @@ mod tests {
     }
 
     #[test]
+    fn test_make_contiguous_full_then_push() {
+        // Regression: make_contiguous on a FULL inline queue used to set
+        // tail = N (out of range), causing the next push_back (after a pop)
+        // to index buf[N] and panic.
+        let mut queue: Queue<i32, 4> = Queue::new();
+        queue.push_back(1);
+        queue.push_back(2);
+        queue.push_back(3);
+        queue.push_back(4); // full: head == tail == 0, len == 4
+
+        let slice = queue.make_contiguous();
+        assert_eq!(slice, &[1, 2, 3, 4]);
+
+        assert_eq!(queue.pop_front(), Some(1));
+        queue.push_back(5); // must not panic
+        assert_eq!(queue.len(), 4);
+
+        let vec: Vec<_> = queue.iter().copied().collect();
+        assert_eq!(vec, vec![2, 3, 4, 5]);
+    }
+
+    #[test]
     fn test_make_contiguous_heap() {
         let mut queue: Queue<i32, 2> = Queue::new();
         queue.push_back(1);
@@ -1643,5 +1681,107 @@ mod tests {
         iter.next();
         assert_eq!(iter.size_hint(), (2, Some(2)));
         assert_eq!(iter.len(), 2);
+    }
+
+    #[test]
+    fn test_retain() {
+        let mut q: Queue<i32, 4> = Queue::new();
+        for v in [1, 2, 3, 4, 5, 6] {
+            q.push_back(v); // spills to heap past 4
+        }
+        q.retain(|&v| v % 2 == 0);
+        assert_eq!(q.iter().copied().collect::<Vec<_>>(), vec![2, 4, 6]);
+
+        // inline-only, with wraparound
+        let mut q: Queue<i32, 4> = Queue::new();
+        q.push_back(1);
+        q.push_back(2);
+        q.push_back(3);
+        q.pop_front();
+        q.push_back(4);
+        q.push_back(5); // [2,3,4,5] wrapped
+        q.retain(|&v| v != 3);
+        assert_eq!(q.iter().copied().collect::<Vec<_>>(), vec![2, 4, 5]);
+
+        // retain none / all
+        q.retain(|_| false);
+        assert!(q.is_empty());
+        let mut q: Queue<i32, 4> = (0..3).collect();
+        q.retain(|_| true);
+        assert_eq!(q.len(), 3);
+    }
+
+    /// Differential fuzz: random ops on `Queue<i32, 4>` vs a `VecDeque` model.
+    #[test]
+    fn test_differential_vs_vecdeque() {
+        let mut q: Queue<i32, 4> = Queue::new();
+        let mut model: VecDeque<i32> = VecDeque::new();
+
+        let mut state = 0x1234_5678_9abc_def0u64;
+        let mut rng = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 33) as u32
+        };
+
+        for i in 0..200_000u32 {
+            // Keep bounded so the per-op content check stays cheap.
+            let op = if model.len() > 256 {
+                2 + rng() % 2
+            } else {
+                rng() % 8
+            };
+            match op {
+                0 => {
+                    let v = rng() as i32;
+                    q.push_back(v);
+                    model.push_back(v);
+                }
+                1 => {
+                    let v = rng() as i32;
+                    q.push_front(v);
+                    model.push_front(v);
+                }
+                2 => assert_eq!(q.pop_back(), model.pop_back(), "pop_back op {i}"),
+                3 => assert_eq!(q.pop_front(), model.pop_front(), "pop_front op {i}"),
+                4 => {
+                    if model.len() >= 2 {
+                        let a = (rng() as usize) % model.len();
+                        let b = (rng() as usize) % model.len();
+                        q.swap(a, b);
+                        model.swap(a, b);
+                    }
+                }
+                5 => {
+                    assert_eq!(
+                        q.make_contiguous().to_vec(),
+                        model.make_contiguous().to_vec(),
+                        "make_contiguous op {i}"
+                    );
+                }
+                6 => {
+                    let keep_even = rng() % 2 == 0;
+                    q.retain(|&v| (v % 2 == 0) == keep_even);
+                    model.retain(|&v| (v % 2 == 0) == keep_even);
+                }
+                7 => {
+                    if rng() % 64 == 0 {
+                        assert_eq!(
+                            q.into_vec(),
+                            model.drain(..).collect::<Vec<_>>(),
+                            "into_vec op {i}"
+                        );
+                    }
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(q.len(), model.len(), "len mismatch after op {i}");
+            assert_eq!(
+                q.iter().copied().collect::<Vec<_>>(),
+                model.iter().copied().collect::<Vec<_>>(),
+                "content mismatch after op {i}"
+            );
+        }
     }
 }

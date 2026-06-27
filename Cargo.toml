@@ -1,7 +1,7 @@
 [package]
 name = "cynosure"
 description = "High performance data structures & primitives from beyond the Blackwall"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 license = "MIT"
 authors = ["zk2u <zk2u@pm.me>"]
@@ -20,7 +20,7 @@ rwlock = ["queue", "hints"]
 
 # activates all site_d functionality
 site_d = ["ringbuf", "triplebuffer"]
-ringbuf = ["hints"]
+ringbuf = ["hints", "futures"]
 triplebuffer = ["hints", "futures"]
 
 monoio-0_2 = ["dep:monoio"]
@@ -32,6 +32,11 @@ criterion = { version = "0.5", features = ["html_reports"] }
 tokio = { version = "1.0", features = ["sync", "rt"] }
 parking_lot = "0.12"
 crossbeam-channel = "0.5"
+flume = "0.11"
+kanal = "0.1"
+ringbuf = "0.4"
+rtrb = "0.3"
+thingbuf = "0.1"
 
 [dependencies]
 futures = {version = "0.3.31", optional = true}
@@ -56,6 +61,16 @@ path = "benches/ringbuf_spsc.rs"
 name = "rwlock"
 harness = false
 path = "benches/rwlock.rs"
+
+[[bench]]
+name = "spsc_compare"
+harness = false
+path = "benches/spsc_compare.rs"
+
+[[bench]]
+name = "triplebuffer"
+harness = false
+path = "benches/triplebuffer.rs"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(unstable)'] }
