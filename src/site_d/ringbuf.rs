@@ -20,8 +20,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use super::notify::WaiterSlot;
-use super::padding::CachePadded;
+use super::{notify::WaiterSlot, padding::CachePadded};
 use crate::{
     blocking::block_on,
     hints::{likely, unlikely},

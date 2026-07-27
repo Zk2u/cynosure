@@ -18,8 +18,8 @@
 //! - the producer and consumer should never block each other.
 //!
 //! Three buffers are the minimum that decouples them: at all times one is being
-//! written, one is being read, and one sits "in the middle" published-and-ready,
-//! so neither side ever waits on the other for a buffer.
+//! written, one is being read, and one sits "in the middle"
+//! published-and-ready, so neither side ever waits on the other for a buffer.
 //!
 //! This implementation is the **lossless, back-pressured** flavor: the writer's
 //! [`publish`](TripleBufWriter::publish) waits until the reader has taken the
@@ -70,6 +70,7 @@
 //! let rbuf = reader.next(None).await;
 //! assert_eq!(&rbuf[..], &[1.0]);
 //! let _next = reader.next(Some(rbuf)).await; // return the buffer to the pool
+//!
 //! # let _ = (&mut next_wbuf,);
 //! # }
 //! ```
@@ -87,14 +88,13 @@ use std::{
     task::{Context, Poll},
 };
 
+// `AlignedBuffer`/`Zeroable` now live in the shared `buffer` module; re-export
+// them here so the long-standing `triplebuffer::AlignedBuffer` path keeps working.
+pub use crate::site_d::buffer::{AlignedBuffer, Zeroable};
 use crate::{
     hints::{likely, unlikely},
     site_d::{notify::WaiterSlot, padding::CachePadded},
 };
-
-// `AlignedBuffer`/`Zeroable` now live in the shared `buffer` module; re-export
-// them here so the long-standing `triplebuffer::AlignedBuffer` path keeps working.
-pub use crate::site_d::buffer::{AlignedBuffer, Zeroable};
 
 // ================== Internal shared state (hidden) ==================
 
@@ -203,8 +203,8 @@ impl<T: Zeroable + Copy> TripleBuffer<T> {
     /// Returns true if there is a published-but-unread buffer.
     ///
     /// The `generation` load is `SeqCst`: as the reader's re-check after arming
-    /// `reader_slot`, it pairs with the writer's `SeqCst` generation publish and
-    /// `reader_slot.signal()` flag-load to forbid a lost wakeup (the
+    /// `reader_slot`, it pairs with the writer's `SeqCst` generation publish
+    /// and `reader_slot.signal()` flag-load to forbid a lost wakeup (the
     /// store-buffer handshake; see [`WaiterSlot`]). `last_read_gen` is the
     /// reader's own counter.
     ///
@@ -495,10 +495,10 @@ impl<T: Zeroable + Copy> TripleBufWriter<T> {
         }
     }
 
-    /// Non-blocking [`publish`](Self::publish). Returns `Ok(next_buffer)` if the
-    /// reader has consumed the previously published buffer; otherwise `Err(buf)`
-    /// hands `buf` back unchanged (the middle slot still holds unread data — try
-    /// again later).
+    /// Non-blocking [`publish`](Self::publish). Returns `Ok(next_buffer)` if
+    /// the reader has consumed the previously published buffer; otherwise
+    /// `Err(buf)` hands `buf` back unchanged (the middle slot still holds
+    /// unread data — try again later).
     ///
     /// `buf` must have come from this triple buffer (same capacity/alignment).
     ///
@@ -547,9 +547,9 @@ impl<T: Zeroable + Copy> TripleBufReader<T> {
         }
     }
 
-    /// Non-blocking [`next`](Self::next). Returns `Ok(published_buffer)` if a new
-    /// buffer is available; otherwise `Err(previous)` hands `previous` back
-    /// unchanged (nothing new to read yet — try again later).
+    /// Non-blocking [`next`](Self::next). Returns `Ok(published_buffer)` if a
+    /// new buffer is available; otherwise `Err(previous)` hands `previous`
+    /// back unchanged (nothing new to read yet — try again later).
     ///
     /// # Panics
     /// Panics if `previous`'s geometry does not match this triple buffer.

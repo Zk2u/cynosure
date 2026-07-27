@@ -16,11 +16,11 @@ use std::{
     rc::Rc,
 };
 
-use super::semaphore::LocalSemaphore;
-use crate::site_d::buffer::{AlignedBuffer, Zeroable};
-
 #[cfg(feature = "monoio-0_2")]
 use monoio::buf::{IoBuf, IoBufMut};
+
+use super::semaphore::LocalSemaphore;
+use crate::site_d::buffer::{AlignedBuffer, Zeroable};
 
 struct PoolInner<T: Zeroable + Copy> {
     // Invariant: `free.len() == sem.available()` at every suspension point.
@@ -92,9 +92,9 @@ impl<T: Zeroable + Copy> LocalBufferPool<T> {
         self.check_out()
     }
 
-    /// Pop a buffer for an already-acquired permit. The semaphore guarantees one
-    /// is free (`free.len() == available()`), and single-threadedness means no
-    /// task runs between the permit grant and this pop.
+    /// Pop a buffer for an already-acquired permit. The semaphore guarantees
+    /// one is free (`free.len() == available()`), and single-threadedness
+    /// means no task runs between the permit grant and this pop.
     #[inline]
     fn check_out(&self) -> PooledBuffer<T> {
         // SAFETY: single-threaded; the borrow is dropped before any callback.
@@ -191,11 +191,16 @@ unsafe impl IoBufMut for PooledBuffer<u8> {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        pin::pin,
+        sync::{
+            Arc as StdArc,
+            atomic::{AtomicBool, Ordering as AO},
+        },
+        task::{Context, Wake, Waker},
+    };
+
     use super::*;
-    use std::pin::pin;
-    use std::sync::Arc as StdArc;
-    use std::sync::atomic::{AtomicBool, Ordering as AO};
-    use std::task::{Context, Wake, Waker};
 
     struct FlagWaker(StdArc<AtomicBool>);
     impl Wake for FlagWaker {

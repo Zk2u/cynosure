@@ -1,5 +1,6 @@
-//! Semaphore: uncontended `try_acquire` + release. cynosure's is single-threaded
-//! (non-atomic `Cell`); the others are thread-safe (atomics), which is the gap.
+//! Semaphore: uncontended `try_acquire` + release. cynosure's is
+//! single-threaded (non-atomic `Cell`); the others are thread-safe (atomics),
+//! which is the gap.
 
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 

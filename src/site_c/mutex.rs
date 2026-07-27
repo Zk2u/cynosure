@@ -137,7 +137,8 @@ impl<T> LocalMutex<T> {
     ///
     /// Called both on release and when a pending lock future is cancelled
     /// (dropped), so a cancelled-but-already-notified waiter passes the turn to
-    /// the next one — otherwise waking exactly one waiter could strand the rest.
+    /// the next one — otherwise waking exactly one waiter could strand the
+    /// rest.
     #[inline]
     fn wake_next(&self) {
         if self.locked.get() {

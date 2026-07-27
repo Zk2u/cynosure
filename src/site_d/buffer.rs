@@ -1,11 +1,11 @@
 //! Owning, custom-aligned, heap buffers shared by the `site_d` IO primitives
-//! ([`triple_buffer`](super::triplebuffer), [`bipbuffer`](super::bipbuffer), and
-//! the buffer [`pool`](crate::site_c::pool)).
+//! ([`triple_buffer`](super::triplebuffer), [`bipbuffer`](super::bipbuffer),
+//! and the buffer [`pool`](crate::site_c::pool)).
 //!
 //! [`AlignedBuffer`] is the unit of zero-copy IO memory: its whole capacity is
-//! zero-initialized once (lazily, via the OS zero pages), so it always derefs to
-//! a safe slice and recycled buffers are never re-zeroed. With the `monoio-0_2`
-//! feature, `AlignedBuffer<u8>` implements `IoBuf`/`IoBufMut`.
+//! zero-initialized once (lazily, via the OS zero pages), so it always derefs
+//! to a safe slice and recycled buffers are never re-zeroed. With the
+//! `monoio-0_2` feature, `AlignedBuffer<u8>` implements `IoBuf`/`IoBufMut`.
 
 use std::{
     alloc::{Layout, alloc_zeroed, dealloc, handle_alloc_error},
@@ -52,9 +52,9 @@ unsafe impl<T: Zeroable, const N: usize> Zeroable for [T; N] {}
 ///
 /// The whole capacity is zero-initialized at construction (lazily, via the OS
 /// zero pages), so every element is always a valid `T` and the buffer derefs to
-/// a safe `&[T]` / `&mut [T]` of its logical [`len`](Self::len). `len` is purely
-/// a "how many elements are meaningful this round" cursor — separate from the
-/// always-valid physical capacity.
+/// a safe `&[T]` / `&mut [T]` of its logical [`len`](Self::len). `len` is
+/// purely a "how many elements are meaningful this round" cursor — separate
+/// from the always-valid physical capacity.
 pub struct AlignedBuffer<T: Zeroable + Copy> {
     // `NonNull<T>` already makes this covariant in `T` and `!Send`/`!Sync`
     // (re-granted under bounds by the manual impls below); since `Drop` never
@@ -150,8 +150,8 @@ impl<T: Zeroable + Copy> AlignedBuffer<T> {
     ///
     /// This is safe (unlike `Vec::set_len`): the entire capacity is always a
     /// valid initialized region of `T`, so any `new_len <= capacity` exposes
-    /// only valid elements. Elements beyond what you actually wrote read back as
-    /// their zero value.
+    /// only valid elements. Elements beyond what you actually wrote read back
+    /// as their zero value.
     ///
     /// # Panics
     /// Panics if `new_len > capacity`.

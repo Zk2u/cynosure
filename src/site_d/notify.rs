@@ -4,18 +4,20 @@
 //! so they share *one* wakeup model instead of hand-rolling it each time. Built
 //! on a vendored [`AtomicWaker`] (no external dependency).
 
-use std::cell::UnsafeCell;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::task::Waker;
+use std::{
+    cell::UnsafeCell,
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    task::Waker,
+};
 
 use crate::hints::unlikely;
 
 // ================== AtomicWaker ==================
 //
 // A `Waker` cell safe against a single registering task racing concurrent
-// `wake()`s — the exact guarantee `WaiterSlot` needs (one waiter parks, the peer
-// signals). This is the well-known three-state machine (as in `futures-util`),
-// vendored so the crate stays dependency-free.
+// `wake()`s — the exact guarantee `WaiterSlot` needs (one waiter parks, the
+// peer signals). This is the well-known three-state machine (as in
+// `futures-util`), vendored so the crate stays dependency-free.
 
 const WAITING: usize = 0; // no register/wake in progress
 const REGISTERING: usize = 0b01; // a task is storing its waker
@@ -41,8 +43,8 @@ impl AtomicWaker {
         }
     }
 
-    /// Register `waker` to be woken by a later [`wake`](Self::wake). At most one
-    /// task may register at a time (the single waiter).
+    /// Register `waker` to be woken by a later [`wake`](Self::wake). At most
+    /// one task may register at a time (the single waiter).
     pub(crate) fn register(&self, waker: &Waker) {
         match self
             .state
@@ -146,8 +148,9 @@ impl WaiterSlot {
         }
     }
 
-    /// Waiting side: register `w` and arm the slot. The caller **must** re-check
-    /// its condition (with a `SeqCst` load) after this returns, before parking.
+    /// Waiting side: register `w` and arm the slot. The caller **must**
+    /// re-check its condition (with a `SeqCst` load) after this returns,
+    /// before parking.
     #[inline(always)]
     pub(crate) fn arm(&self, w: &Waker) {
         self.waker.register(w);

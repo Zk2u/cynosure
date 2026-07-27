@@ -4,10 +4,9 @@
 //! `resvg` is pure Rust and only ever a dependency of this tool — the library
 //! itself stays dependency-free.
 
-use resvg::tiny_skia;
-use resvg::usvg;
-use std::path::Path;
-use std::sync::OnceLock;
+use std::{path::Path, sync::OnceLock};
+
+use resvg::{tiny_skia, usvg};
 
 /// Chart PNGs are emitted at this multiple of their SVG dimensions.
 pub const SCALE: f32 = 4.0;

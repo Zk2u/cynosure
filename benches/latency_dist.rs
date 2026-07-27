@@ -10,27 +10,26 @@
 //!   own overhead (tens of ns), so timing one op is impossible. Instead each
 //!   sample times a batch of `BATCH` operations and divides. The result is a
 //!   distribution of *per-op cost averaged over a batch*: it still exposes
-//!   allocator hiccups, page faults and preemption (the things that make a tail),
-//!   but it cannot show a single unlucky operation. Charts say which mode was
-//!   used.
+//!   allocator hiccups, page faults and preemption (the things that make a
+//!   tail), but it cannot show a single unlucky operation. Charts say which
+//!   mode was used.
 //!
 //! Emits `docs/bench-data/latency-primitives.csv`.
 
-use std::fs;
-use std::hint::black_box;
-use std::path::PathBuf;
-use std::thread;
-use std::time::Instant;
+use std::{fs, hint::black_box, path::PathBuf, thread, time::Instant};
 
-use cynosure::site_c::mutex::LocalMutex;
-use cynosure::site_c::pool::LocalBufferPool;
-use cynosure::site_c::queue::Queue;
-use cynosure::site_c::rwlock::LocalRwLock;
-use cynosure::site_c::semaphore::LocalSemaphore;
-use cynosure::site_d::bipbuffer::bip_buffer;
-use cynosure::site_d::oneshot::oneshot;
-use cynosure::site_d::ringbuf::RingBuf;
-use cynosure::site_d::triplebuffer::{AlignedBuffer, triple_buffer};
+use cynosure::{
+    site_c::{
+        mutex::LocalMutex, pool::LocalBufferPool, queue::Queue, rwlock::LocalRwLock,
+        semaphore::LocalSemaphore,
+    },
+    site_d::{
+        bipbuffer::bip_buffer,
+        oneshot::oneshot,
+        ringbuf::RingBuf,
+        triplebuffer::{AlignedBuffer, triple_buffer},
+    },
+};
 
 /// Samples per series — enough to resolve p99.9.
 const SAMPLES: usize = 4000;

@@ -2,33 +2,36 @@
 //! always hands out a single **contiguous** region for each read and write.
 //!
 //! Where a [`RingBuf`](super::ringbuf) of bytes gives you *two* slices at the
-//! wrap, a bip buffer guarantees one — so reservations go straight to io_uring /
-//! `readv` / DMA with zero copy. It uses the same wakeup discipline as the ring
-//! (`WaiterSlot` + the `SeqCst` publish/re-check
+//! wrap, a bip buffer guarantees one — so reservations go straight to io_uring
+//! / `readv` / DMA with zero copy. It uses the same wakeup discipline as the
+//! ring (`WaiterSlot` + the `SeqCst` publish/re-check
 //! handshake) but wraps with a **watermark** instead of power-of-2 masking, so
 //! the capacity is arbitrary.
 //!
 //! # Reserve / commit
 //!
-//! The producer [`reserve`](Producer::reserve)s a contiguous region, writes into
-//! it (or hands it to the kernel), then [`commit`](WriteGrant::commit)s the
-//! bytes actually produced. The consumer [`read`](Consumer::read)s the
+//! The producer [`reserve`](Producer::reserve)s a contiguous region, writes
+//! into it (or hands it to the kernel), then [`commit`](WriteGrant::commit)s
+//! the bytes actually produced. The consumer [`read`](Consumer::read)s the
 //! contiguous readable region and [`release`](ReadGrant::release)s what it
-//! consumed. Grants are `Arc`-backed (`'static`) and implement `IoBuf`/`IoBufMut`
-//! under `monoio-0_2`. Dropping a grant without commit/release is safe: a write
-//! reservation is abandoned, a read is left unconsumed.
+//! consumed. Grants are `Arc`-backed (`'static`) and implement
+//! `IoBuf`/`IoBufMut` under `monoio-0_2`. Dropping a grant without
+//! commit/release is safe: a write reservation is abandoned, a read is left
+//! unconsumed.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::task::{Context, Poll};
-
-use super::buffer::AlignedBuffer;
-use super::notify::WaiterSlot;
-use super::padding::CachePadded;
-use crate::hints::{likely, unlikely};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    task::{Context, Poll},
+};
 
 #[cfg(feature = "monoio-0_2")]
 use monoio::buf::{IoBuf, IoBufMut};
+
+use super::{buffer::AlignedBuffer, notify::WaiterSlot, padding::CachePadded};
+use crate::hints::{likely, unlikely};
 
 struct Inner {
     buf: AlignedBuffer<u8>,
@@ -90,7 +93,8 @@ impl Inner {
         unsafe { (self.buf.as_ptr() as *mut u8).add(offset) }
     }
 
-    /// Try to reserve `n` contiguous bytes; returns the region `[start, start+n)`.
+    /// Try to reserve `n` contiguous bytes; returns the region `[start,
+    /// start+n)`.
     fn try_reserve(&self, n: usize) -> Option<(usize, usize)> {
         if unlikely(self.wip.load(Ordering::Relaxed)) {
             return None; // a write grant is already outstanding
@@ -192,8 +196,8 @@ pub struct Consumer {
 }
 
 impl Consumer {
-    /// Get the contiguous readable region without waiting; `None` if empty (or a
-    /// read grant is already outstanding).
+    /// Get the contiguous readable region without waiting; `None` if empty (or
+    /// a read grant is already outstanding).
     #[inline]
     pub fn try_read(&mut self) -> Option<ReadGrant> {
         self.inner.try_read().map(|(start, len)| ReadGrant {
@@ -493,17 +497,20 @@ mod tests {
     }
 
     /// A committed grant's `Drop` must not clear the in-progress flag a second
-    /// time — otherwise a grant taken *during* `commit`'s `signal()` (grants are
-    /// `Send`, and a waker runs arbitrary safe code) is silently released while
-    /// still live, and the next reserve hands out an overlapping `&mut [u8]`.
+    /// time — otherwise a grant taken *during* `commit`'s `signal()` (grants
+    /// are `Send`, and a waker runs arbitrary safe code) is silently
+    /// released while still live, and the next reserve hands out an
+    /// overlapping `&mut [u8]`.
     ///
     /// Reproduced deterministically by parking a consumer whose waker takes a
     /// fresh write grant from inside the wake.
     #[test]
     fn commit_drop_cannot_release_a_later_grant() {
-        use std::pin::Pin;
-        use std::sync::Mutex;
-        use std::task::{Wake, Waker};
+        use std::{
+            pin::Pin,
+            sync::Mutex,
+            task::{Wake, Waker},
+        };
 
         struct Reenter {
             producer: Mutex<Option<Producer>>,

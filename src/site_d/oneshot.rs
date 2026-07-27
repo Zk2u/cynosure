@@ -18,13 +18,17 @@
 //! # }
 //! ```
 
-use std::cell::UnsafeCell;
-use std::future::Future;
-use std::mem::MaybeUninit;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
-use std::task::{Context, Poll};
+use std::{
+    cell::UnsafeCell,
+    future::Future,
+    mem::MaybeUninit,
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicU8, Ordering},
+    },
+    task::{Context, Poll},
+};
 
 use super::notify::WaiterSlot;
 use crate::hints::unlikely;
@@ -55,9 +59,9 @@ impl<T> Inner<T> {
     /// the sender is done (`Sender::drop` after a successful send takes the
     /// no-write branch, same-thread program order), and every `TAKEN`/receiver
     /// transition happens on this single receiver thread. `Inner::drop` reads
-    /// via `get_mut` behind the `Arc` teardown's release/acquire, so a `Relaxed`
-    /// store is sufficient and compiles to a plain `strb` instead of an
-    /// `ldsetalb` RMW on AArch64.
+    /// via `get_mut` behind the `Arc` teardown's release/acquire, so a
+    /// `Relaxed` store is sufficient and compiles to a plain `strb` instead
+    /// of an `ldsetalb` RMW on AArch64.
     #[inline]
     fn take_value(&self, s: u8) -> Option<T> {
         if unlikely(s & TAKEN != 0) {
@@ -117,9 +121,10 @@ pub fn oneshot<T>() -> (Sender<T>, Receiver<T>) {
 impl<T> Sender<T> {
     /// Send `value`, waking the receiver if it is parked.
     ///
-    /// Returns `Err(value)` (handing the value back) if the receiver was already
-    /// dropped. If the receiver drops *concurrently* with a successful send, the
-    /// value is delivered to the channel and then dropped unread — never leaked.
+    /// Returns `Err(value)` (handing the value back) if the receiver was
+    /// already dropped. If the receiver drops *concurrently* with a
+    /// successful send, the value is delivered to the channel and then
+    /// dropped unread — never leaked.
     pub fn send(self, value: T) -> Result<(), T> {
         let s = self.inner.state.load(Ordering::Acquire);
         if unlikely(s & RECEIVER_DROPPED != 0) {
@@ -157,8 +162,8 @@ impl<T> Drop for Sender<T> {
 }
 
 impl<T> Receiver<T> {
-    /// Non-blocking receive: `Ok(Some(v))` if a value is ready, `Ok(None)` if not
-    /// yet, `Err(RecvError)` if the sender dropped without sending.
+    /// Non-blocking receive: `Ok(Some(v))` if a value is ready, `Ok(None)` if
+    /// not yet, `Err(RecvError)` if the sender dropped without sending.
     pub fn try_recv(&mut self) -> Result<Option<T>, RecvError> {
         let s = self.inner.state.load(Ordering::SeqCst);
         if s & VALUE_SET != 0 {
@@ -218,8 +223,9 @@ impl<T> Drop for Receiver<T> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::task::{RawWaker, RawWakerVTable, Waker};
+
+    use super::*;
 
     fn noop_waker() -> Waker {
         fn no(_: *const ()) {}
@@ -271,13 +277,15 @@ mod tests {
 
     /// Race the sender's `store(s | VALUE_SET)` publish against a concurrent
     /// receiver drop — the exact interleaving the RMW→store change must keep
-    /// safe. Whatever the outcome (Err(v) handed back, or delivered-then-dropped
-    /// by `Inner::drop`), the value must be dropped exactly once: never leaked,
-    /// never double-dropped.
+    /// safe. Whatever the outcome (Err(v) handed back, or
+    /// delivered-then-dropped by `Inner::drop`), the value must be dropped
+    /// exactly once: never leaked, never double-dropped.
     #[test]
     fn concurrent_send_vs_receiver_drop_never_leaks() {
-        use std::sync::Arc as StdArc;
-        use std::sync::atomic::{AtomicUsize, Ordering as AO};
+        use std::sync::{
+            Arc as StdArc,
+            atomic::{AtomicUsize, Ordering as AO},
+        };
 
         struct Counted(StdArc<AtomicUsize>);
         impl Drop for Counted {
@@ -300,7 +308,8 @@ mod tests {
     }
 
     /// Cross-thread send → recv: the SeqCst store publish must still carry the
-    /// value and the wakeup (the SB-free handshake) with a real parked receiver.
+    /// value and the wakeup (the SB-free handshake) with a real parked
+    /// receiver.
     #[test]
     fn concurrent_send_recv_cross_thread() {
         let iters = if cfg!(miri) { 40 } else { 2000 };

@@ -1,16 +1,18 @@
 //! The two chart forms.
 //!
 //! * [`throughput_bars`] — magnitude across competitors. One series (the
-//!   measure); identity is carried by the axis label, so colour is used only for
-//!   emphasis (cynosure in the brand green, the field neutral) and no legend is
-//!   needed. Every bar is direct-labelled with its value.
+//!   measure); identity is carried by the axis label, so colour is used only
+//!   for emphasis (cynosure in the brand green, the field neutral) and no
+//!   legend is needed. Every bar is direct-labelled with its value.
 //! * [`latency_percentiles`] — a latency *distribution* as a percentile curve
 //!   (the HDR-histogram idiom): x is `1/(1-p)` on a log scale, so the tail gets
 //!   the room it deserves, and a rightward/downward curve is unambiguously
 //!   better. Multi-series, so it carries a legend *and* direct labels.
 
-use crate::svg::{Anchor, Svg};
-use crate::theme as t;
+use crate::{
+    svg::{Anchor, Svg},
+    theme as t,
+};
 
 /// Every chart is emitted on the same canvas width so that a README showing
 /// them one under another renders all type at the *same* size. Gutters flex to

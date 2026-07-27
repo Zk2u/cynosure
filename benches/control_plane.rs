@@ -12,15 +12,16 @@
 //!      message latency AND how much co-located work still gets done — the
 //!      cost the channel imposes on its neighbors.
 
-use std::fs;
-use std::future::Future;
-use std::path::PathBuf;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::task::{Context, Poll, Wake, Waker};
-use std::thread::{self, Thread};
-use std::time::{Duration, Instant};
+use std::{
+    fs,
+    future::Future,
+    path::PathBuf,
+    pin::Pin,
+    sync::{Arc, Mutex},
+    task::{Context, Poll, Wake, Waker},
+    thread::{self, Thread},
+    time::{Duration, Instant},
+};
 
 use cynosure::site_d::mpsc_light;
 
@@ -226,7 +227,8 @@ fn scenario_a<C: Chan>() {
 }
 
 // ---------------------------------------------------------------------------
-// B: paced fan-in — 8 producers at ~1 µs each (aggregate ~8 M/s, shallow queue).
+// B: paced fan-in — 8 producers at ~1 µs each (aggregate ~8 M/s, shallow
+// queue).
 // ---------------------------------------------------------------------------
 fn scenario_b<C: Chan>() {
     const PRODUCERS: usize = 8;
@@ -277,10 +279,9 @@ fn scenario_b<C: Chan>() {
 // tasks; paced external producer. Latency + co-located work throughput.
 // ---------------------------------------------------------------------------
 fn scenario_c<C: Chan>() {
-    use futures::executor::LocalPool;
-    use futures::task::LocalSpawnExt;
-    use std::cell::Cell;
-    use std::rc::Rc;
+    use std::{cell::Cell, rc::Rc};
+
+    use futures::{executor::LocalPool, task::LocalSpawnExt};
 
     const MSGS: usize = 3000;
     const GAP: Duration = Duration::from_micros(5);

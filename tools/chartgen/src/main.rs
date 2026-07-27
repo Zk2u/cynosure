@@ -5,8 +5,8 @@
 //! cargo run --manifest-path tools/chartgen/Cargo.toml
 //! ```
 //!
-//! Input lives in `docs/bench-data/` and is written by the committed benches, so
-//! a chart is never hand-edited — re-run the benches and re-run this.
+//! Input lives in `docs/bench-data/` and is written by the committed benches,
+//! so a chart is never hand-edited — re-run the benches and re-run this.
 //!
 //! * `throughput.csv` — `chart,label,value,hero` plus `#title:`/`#subtitle:`/
 //!   `#unit:` directives per chart id.
@@ -17,10 +17,13 @@ mod render;
 mod svg;
 mod theme;
 
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+};
+
 use charts::{Bar, Better, Series};
-use std::collections::BTreeMap;
-use std::fs;
-use std::path::{Path, PathBuf};
 
 /// Per-chart metadata declared by `#key:chart:value` directive rows.
 #[derive(Default)]
@@ -28,7 +31,8 @@ struct Meta {
     title: String,
     subtitle: String,
     unit: String,
-    /// `#better:<chart>:lower` for latency charts; defaults to higher-is-better.
+    /// `#better:<chart>:lower` for latency charts; defaults to
+    /// higher-is-better.
     lower_is_better: bool,
 }
 

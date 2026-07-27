@@ -5,11 +5,13 @@
 //! measured, not the runtime (`futures::block_on`'s allocating waker skews
 //! low-N numbers; a real runtime's waker clone is a refcount bump, like this).
 
-use std::future::Future;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
-use std::thread::{self, Thread};
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll, Wake, Waker},
+    thread::{self, Thread},
+};
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use cynosure::site_d::mpsc_light;

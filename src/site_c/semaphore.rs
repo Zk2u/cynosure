@@ -6,11 +6,11 @@
 //! machinery: a `(token, n, Waker)` queue, per-future tokens for exact
 //! deregistration, FIFO `wake_next` torch-passing, and cancellation safety.
 //!
-//! Async [`acquire`](LocalSemaphore::acquire) is **FIFO-fair**: the front waiter
-//! is satisfied before any later one, so a large request can't be starved by a
-//! stream of small ones (it does mean head-of-line blocking, the standard FIFO
-//! trade). [`try_acquire`](LocalSemaphore::try_acquire) is opportunistic and may
-//! barge queued waiters.
+//! Async [`acquire`](LocalSemaphore::acquire) is **FIFO-fair**: the front
+//! waiter is satisfied before any later one, so a large request can't be
+//! starved by a stream of small ones (it does mean head-of-line blocking, the
+//! standard FIFO trade). [`try_acquire`](LocalSemaphore::try_acquire) is
+//! opportunistic and may barge queued waiters.
 
 use std::{
     cell::{Cell, UnsafeCell},
@@ -113,9 +113,9 @@ impl LocalSemaphore {
     }
 
     /// Wake the FIFO-front waiter iff it can now be satisfied. Does **not** pop
-    /// it — the future deregisters itself once it actually acquires. Never skips
-    /// the front (FIFO / no large-request starvation). Cold: only reached when
-    /// waiters exist (the uncontended release path skips it).
+    /// it — the future deregisters itself once it actually acquires. Never
+    /// skips the front (FIFO / no large-request starvation). Cold: only
+    /// reached when waiters exist (the uncontended release path skips it).
     #[cold]
     #[inline(never)]
     fn wake_next(&self) {
@@ -280,11 +280,16 @@ impl<'a> std::fmt::Debug for Permit<'a> {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        pin::pin,
+        sync::{
+            Arc as StdArc,
+            atomic::{AtomicBool, Ordering as AO},
+        },
+        task::Wake,
+    };
+
     use super::*;
-    use std::pin::pin;
-    use std::sync::Arc as StdArc;
-    use std::sync::atomic::{AtomicBool, Ordering as AO};
-    use std::task::Wake;
 
     struct FlagWaker(StdArc<AtomicBool>);
     impl Wake for FlagWaker {

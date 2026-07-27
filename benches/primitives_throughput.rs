@@ -8,16 +8,12 @@
 //! Emits `docs/bench-data/throughput-measured.csv`, which `tools/chartgen`
 //! reads alongside the hand-recorded `throughput.csv`.
 
-use std::fs;
-use std::hint::black_box;
-use std::path::PathBuf;
-use std::time::Instant;
+use std::{fs, hint::black_box, path::PathBuf, time::Instant};
 
-use cynosure::site_c::pool::LocalBufferPool;
-use cynosure::site_c::queue::Queue;
-use cynosure::site_c::semaphore::LocalSemaphore;
-use cynosure::site_d::bipbuffer::bip_buffer;
-use cynosure::site_d::oneshot::oneshot;
+use cynosure::{
+    site_c::{pool::LocalBufferPool, queue::Queue, semaphore::LocalSemaphore},
+    site_d::{bipbuffer::bip_buffer, oneshot::oneshot},
+};
 
 /// Run `f` for `iters` operations and return millions of ops/second.
 fn mops(iters: u64, mut f: impl FnMut()) -> f64 {

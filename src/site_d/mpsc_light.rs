@@ -7,34 +7,39 @@
 //! bandwidth. For a fixed 1:1 stream use [`RingBuf`](super::ringbuf); for a
 //! single reply use [`oneshot`](super::oneshot).
 //!
-//! The queue is a `VecDeque` under a short hand-rolled **TTAS spinlock** (the same
-//! shape kanal uses): producers serialize through a ~20 ns critical section rather
-//! than a CAS-retry storm. The single consumer **batch-drains** under one lock
-//! into a local staging buffer and serves from it lock-free between drains, so it
-//! pays the lock once per batch, not per item.
+//! The queue is a `VecDeque` under a short hand-rolled **TTAS spinlock** (the
+//! same shape kanal uses): producers serialize through a ~20 ns critical
+//! section rather than a CAS-retry storm. The single consumer **batch-drains**
+//! under one lock into a local staging buffer and serves from it lock-free
+//! between drains, so it pays the lock once per batch, not per item.
 //!
 //! Backpressured senders park in a **wait-list held under the same lock** (a
-//! single-threaded [`Queue`], since the spinlock serializes access) — so a sender
-//! parks and a freed slot wakes it in *one* lock acquisition, with no separate
-//! mutex and no cross-thread handshake (the lock orders it). The consumer parks
-//! on a flag-gated `WaiterSlot`. `recv()` is **polite by default** — it parks
-//! promptly, costing a shared reactor's co-located tasks nothing while idle;
-//! `recv_hot()` opts into a short pre-park spin window for consumers that own
-//! their thread (~70 ns catch vs the ~2 µs park path). Sync `try_*` is the bare
-//! locked queue.
+//! single-threaded [`Queue`], since the spinlock serializes access) — so a
+//! sender parks and a freed slot wakes it in *one* lock acquisition, with no
+//! separate mutex and no cross-thread handshake (the lock orders it). The
+//! consumer parks on a flag-gated `WaiterSlot`. `recv()` is **polite by
+//! default** — it parks promptly, costing a shared reactor's co-located tasks
+//! nothing while idle; `recv_hot()` opts into a short pre-park spin window for
+//! consumers that own their thread (~70 ns catch vs the ~2 µs park path). Sync
+//! `try_*` is the bare locked queue.
 
-use std::cell::UnsafeCell;
-use std::collections::VecDeque;
-use std::future::Future;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::task::{Context, Poll, Waker};
+use std::{
+    cell::UnsafeCell,
+    collections::VecDeque,
+    future::Future,
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    task::{Context, Poll, Waker},
+};
 
-use super::notify::WaiterSlot;
-use super::padding::CachePadded;
-use crate::hints::{likely, unlikely};
-use crate::site_c::queue::Queue;
+use super::{notify::WaiterSlot, padding::CachePadded};
+use crate::{
+    hints::{likely, unlikely},
+    site_c::queue::Queue,
+};
 
 /// Backpressured senders, parked under the channel lock. Single-threaded access
 /// (the spinlock serializes), so cynosure's non-atomic [`Queue`] is the right
@@ -45,8 +50,8 @@ struct Waiters {
 }
 
 /// Spin a small pseudo-random count to desynchronize lock contenders (a cheap
-/// atomic-LCG, as in kanal's `spin_rand`), so they don't re-CAS the freed lock in
-/// lockstep and storm the cache line.
+/// atomic-LCG, as in kanal's `spin_rand`), so they don't re-CAS the freed lock
+/// in lockstep and storm the cache line.
 #[inline]
 fn jitter() {
     use std::sync::atomic::AtomicU32;
@@ -58,10 +63,10 @@ fn jitter() {
     }
 }
 
-/// The producer-hot cluster: the lock and everything touched inside its critical
-/// section. `repr(C)` pins the order so it all sits on the one cache line the
-/// lock CAS already owns — the `len` publish and the queue-header access are
-/// then hits on an owned line, not extra coherency traffic.
+/// The producer-hot cluster: the lock and everything touched inside its
+/// critical section. `repr(C)` pins the order so it all sits on the one cache
+/// line the lock CAS already owns — the `len` publish and the queue-header
+/// access are then hits on an owned line, not extra coherency traffic.
 #[repr(C)]
 struct Hot<T> {
     // A `VecDeque` guarded by a hand-rolled **TTAS spinlock** — the same shape as
@@ -97,7 +102,8 @@ struct Inner<T> {
     closed: AtomicBool,                // receiver dropped (shares the tail line)
 }
 
-// SAFETY: the spinlock makes every `queue`/`waiters` access exclusive; `T: Send`.
+// SAFETY: the spinlock makes every `queue`/`waiters` access exclusive; `T:
+// Send`.
 unsafe impl<T: Send> Send for Inner<T> {}
 unsafe impl<T: Send> Sync for Inner<T> {}
 
@@ -195,17 +201,18 @@ impl<T> Inner<T> {
         k
     }
 
-    /// `send`'s push: enqueue if there's room, else park `waker` in the under-lock
-    /// wait-list and return the parker's id — all in one lock acquisition. The lock
-    /// serializes the full-check and the consumer's drain, so the wakeup can't be
-    /// lost (no separate SeqCst handshake needed).
+    /// `send`'s push: enqueue if there's room, else park `waker` in the
+    /// under-lock wait-list and return the parker's id — all in one lock
+    /// acquisition. The lock serializes the full-check and the consumer's
+    /// drain, so the wakeup can't be lost (no separate SeqCst handshake
+    /// needed).
     ///
     /// Deregistering a previous parking is deliberately a *separate*
     /// [`remove_waiter`](Self::remove_waiter) call rather than merged in here:
-    /// releasing the lock between the deregister and this push lets the consumer's
-    /// buffer-steal interleave, and that steal is what frees the queue for
-    /// producers to proceed. Measured: merging the two into one longer critical
-    /// section costs 12–19% multi-producer throughput.
+    /// releasing the lock between the deregister and this push lets the
+    /// consumer's buffer-steal interleave, and that steal is what frees the
+    /// queue for producers to proceed. Measured: merging the two into one
+    /// longer critical section costs 12–19% multi-producer throughput.
     #[inline]
     fn push_or_park(&self, val: T, waker: &Waker) -> Result<(), PushParked<T>> {
         self.lock();
@@ -241,13 +248,14 @@ impl<T> Inner<T> {
         self.unlock();
     }
 
-    /// **Buffer-steal** (single-consumer only): swap the *entire* shared queue out
-    /// for the consumer's empty `staging` in O(1) — three words, not O(batch) of
-    /// element moves — so the consumer barely touches the lock. It then drains the
-    /// stolen queue privately, lock-free. A general MPMC consumer can't do this; a
-    /// lone consumer owns the whole queue. `staging` must be empty on entry.
-    /// Wakes one parked sender to start refilling the now-empty buffer (it bursts
-    /// the rest). Returns the number stolen.
+    /// **Buffer-steal** (single-consumer only): swap the *entire* shared queue
+    /// out for the consumer's empty `staging` in O(1) — three words, not
+    /// O(batch) of element moves — so the consumer barely touches the lock.
+    /// It then drains the stolen queue privately, lock-free. A general MPMC
+    /// consumer can't do this; a lone consumer owns the whole queue.
+    /// `staging` must be empty on entry. Wakes one parked sender to start
+    /// refilling the now-empty buffer (it bursts the rest). Returns the
+    /// number stolen.
     fn steal_into(&self, staging: &mut VecDeque<T>) -> usize {
         self.lock();
         // SAFETY: exclusive under the lock.
@@ -281,7 +289,8 @@ impl<T> Inner<T> {
         }
     }
 
-    /// Wake every parked sender (the receiver dropped — they must observe closure).
+    /// Wake every parked sender (the receiver dropped — they must observe
+    /// closure).
     fn wake_all_waiters(&self) {
         self.lock();
         // SAFETY: exclusive under the lock.
@@ -432,9 +441,10 @@ impl<T> Drop for Sender<T> {
     }
 }
 
-/// Future for [`Sender::send`]. Re-checks per poll (never holds queue state across
-/// a suspend), and parks in the under-lock wait-list so a freed slot wakes exactly
-/// one waiting sender (no herd). `parked_id` lets it deregister on cancellation.
+/// Future for [`Sender::send`]. Re-checks per poll (never holds queue state
+/// across a suspend), and parks in the under-lock wait-list so a freed slot
+/// wakes exactly one waiting sender (no herd). `parked_id` lets it deregister
+/// on cancellation.
 pub struct Send_<'a, T> {
     inner: &'a Inner<T>,
     val: Option<T>,
@@ -485,10 +495,10 @@ impl<'a, T> Drop for Send_<'a, T> {
 }
 
 /// Spin budget the consumer burns trying to catch an item before parking.
-/// Pure `spin_loop` — **no `yield_now`**: yielding the OS thread inside `poll()`
-/// stalls co-located tasks on a shared executor (measured: removing the yields
-/// was free on dedicated-thread executors and recovered up to +40% on a tokio
-/// worker pool).
+/// Pure `spin_loop` — **no `yield_now`**: yielding the OS thread inside
+/// `poll()` stalls co-located tasks on a shared executor (measured: removing
+/// the yields was free on dedicated-thread executors and recovered up to +40%
+/// on a tokio worker pool).
 const RECV_SPIN: usize = 192;
 
 /// The single consumer. Not `Clone` — which is what licenses the local,
@@ -668,10 +678,10 @@ impl<'a, T> Drop for Recv<'a, T> {
 
 #[cfg(test)]
 mod tests {
+    use std::{sync::atomic::AtomicU64, thread};
+
     use super::*;
     use crate::blocking::block_on;
-    use std::sync::atomic::AtomicU64;
-    use std::thread;
 
     #[test]
     fn basic_send_recv() {

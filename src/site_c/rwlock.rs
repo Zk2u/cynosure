@@ -1,4 +1,5 @@
-//! `LocalRwLock` — a single-threaded async reader-writer lock, write-preferring.
+//! `LocalRwLock` — a single-threaded async reader-writer lock,
+//! write-preferring.
 //!
 //! Non-atomic like [`LocalMutex`](super::mutex), and likewise held across
 //! `.await`.
@@ -230,8 +231,8 @@ impl<T> LocalRwLock<T> {
     /// waiting readers are woken (they can share). Called on every release and
     /// on cancellation of a pending future, so a cancelled-but-notified waiter
     /// passes the turn to the next one. Because cancelled futures deregister
-    /// their wakers, a non-empty `write_waiters` always means a *live* writer is
-    /// queued.
+    /// their wakers, a non-empty `write_waiters` always means a *live* writer
+    /// is queued.
     #[inline]
     fn wake_next(&self) {
         if self.writer.get() || self.readers.get() > 0 {
@@ -908,7 +909,8 @@ mod tests {
     }
 
     /// Two writer futures of the SAME lock driven by ONE task (shared waker):
-    /// when the first acquires and deregisters, the second must NOT be stranded.
+    /// when the first acquires and deregisters, the second must NOT be
+    /// stranded.
     #[test]
     fn rwlock_two_writers_one_task_both_progress() {
         let lock = LocalRwLock::new(0i32);

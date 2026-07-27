@@ -502,7 +502,8 @@ impl<T, const N: usize> Drop for Queue<T, N> {
 pub enum Iter<'a, T, const N: usize> {
     /// Iterating the inline storage: a slice plus the ring cursor.
     Inline {
-        /// The inline backing store; only `remaining` slots from `head` are live.
+        /// The inline backing store; only `remaining` slots from `head` are
+        /// live.
         buf: &'a [std::mem::MaybeUninit<T>; N],
         /// Index of the next element to yield.
         head: usize,
@@ -604,7 +605,8 @@ impl<'a, T, const N: usize> IntoIterator for &'a Queue<T, N> {
 pub enum IterMut<'a, T, const N: usize> {
     /// Iterating the inline storage: a slice plus the ring cursor.
     Inline {
-        /// The inline backing store; only `remaining` slots from `head` are live.
+        /// The inline backing store; only `remaining` slots from `head` are
+        /// live.
         buf: &'a mut [MaybeUninit<T>; N],
         /// Index of the next element to yield.
         head: usize,
