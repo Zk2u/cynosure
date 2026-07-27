@@ -71,69 +71,69 @@ derived from the other. Full tables and caveats in [BENCHMARKS.md](BENCHMARKS.md
 
 ### `RingBuf` — SPSC ring buffer
 
-<img src="https://raw.githubusercontent.com/Zk2u/cynosure/main/docs/charts/ringbuf-spsc-throughput.png" alt="RingBuf SPSC throughput 2 threads: cynosure 450 Melem/s, rtrb 400, ringbuf 220, thingbuf 158, std::mpsc 140, crossbeam 137, kanal 38, flume 19" width="100%">
+<img src="https://raw.githubusercontent.com/Zk2u/cynosure/main/docs/charts/ringbuf-spsc-throughput.svg" alt="RingBuf SPSC throughput 2 threads: cynosure 450 Melem/s, rtrb 400, ringbuf 220, thingbuf 158, std::mpsc 140, crossbeam 137, kanal 38, flume 19" width="100%">
 
-<img src="https://raw.githubusercontent.com/Zk2u/cynosure/main/docs/charts/ringbuf-async-throughput.png" alt="RingBuf async cross-core throughput: cynosure 90 Melem/s, kanal 68, tokio 15, flume 13" width="100%">
+<img src="https://raw.githubusercontent.com/Zk2u/cynosure/main/docs/charts/ringbuf-async-throughput.svg" alt="RingBuf async cross-core throughput: cynosure 90 Melem/s, kanal 68, tokio 15, flume 13" width="100%">
 
-<img src="https://raw.githubusercontent.com/Zk2u/cynosure/main/docs/charts/ringbuf-latency-dist.png" alt="RingBuf cross-thread handoff latency distribution: cynosure flat at 62 ns to p99 rising to 104 ns at p99.9, crossbeam 104 ns at p50 rising to 208 ns" width="100%">
+<img src="https://raw.githubusercontent.com/Zk2u/cynosure/main/docs/charts/ringbuf-latency-dist.svg" alt="RingBuf cross-thread handoff latency distribution: cynosure flat at 62 ns to p99 rising to 104 ns at p99.9, crossbeam 104 ns at p50 rising to 208 ns" width="100%">
 
 ### `mpsc_light` — control-plane channel
 
-<img src="https://raw.githubusercontent.com/Zk2u/cynosure/main/docs/charts/mpsc-light-fanin.png" alt="mpsc_light async fan-in at 16 producers: cynosure 73 Melem/s, kanal 28, async-channel 4.2, flume 3.4, std::mpsc 3.2, tokio 0.6" width="100%">
+<img src="https://raw.githubusercontent.com/Zk2u/cynosure/main/docs/charts/mpsc-light-fanin.svg" alt="mpsc_light async fan-in at 16 producers: cynosure 73 Melem/s, kanal 28, async-channel 4.2, flume 3.4, std::mpsc 3.2, tokio 0.6" width="100%">
 
-<img src="https://raw.githubusercontent.com/Zk2u/cynosure/main/docs/charts/mpsc-light-latency-dist.png" alt="mpsc_light latency under paced fan-in: cynosure under 100 microseconds through p99.99, kanal past 1 ms beyond p99, tokio flat near 130 microseconds" width="100%">
+<img src="https://raw.githubusercontent.com/Zk2u/cynosure/main/docs/charts/mpsc-light-latency-dist.svg" alt="mpsc_light latency under paced fan-in: cynosure under 100 microseconds through p99.99, kanal past 1 ms beyond p99, tokio flat near 130 microseconds" width="100%">
 
-<img src="https://raw.githubusercontent.com/Zk2u/cynosure/main/docs/charts/mpsc-light-reactor-dist.png" alt="mpsc_light delivery latency inside a shared reactor: cynosure lowest at p50 through p99, tail rising past kanal at p99.9" width="100%">
+<img src="https://raw.githubusercontent.com/Zk2u/cynosure/main/docs/charts/mpsc-light-reactor-dist.svg" alt="mpsc_light delivery latency inside a shared reactor: cynosure lowest at p50 through p99, tail rising past kanal at p99.9" width="100%">
 
 ### `triple_buffer` — zero-copy whole-buffer handoff
 
-<img src="https://raw.githubusercontent.com/Zk2u/cynosure/main/docs/charts/triplebuffer-bandwidth.png" alt="triple_buffer streamed bandwidth at 64 KB buffers: cynosure 19.7 GiB/s, crossbeam-recycle 19.2 GiB/s" width="100%">
+<img src="https://raw.githubusercontent.com/Zk2u/cynosure/main/docs/charts/triplebuffer-bandwidth.svg" alt="triple_buffer streamed bandwidth at 64 KB buffers: cynosure 19.7 GiB/s, crossbeam-recycle 19.2 GiB/s" width="100%">
 
-<img src="https://raw.githubusercontent.com/Zk2u/cynosure/main/docs/charts/triplebuffer-latency-dist.png" alt="triple_buffer rotation latency distribution to p99: cynosure 8.4 ns at p50, crossbeam-recycle 18.1" width="100%">
+<img src="https://raw.githubusercontent.com/Zk2u/cynosure/main/docs/charts/triplebuffer-latency-dist.svg" alt="triple_buffer rotation latency distribution to p99: cynosure 8.4 ns at p50, crossbeam-recycle 18.1" width="100%">
 
 ### `bip_buffer` — contiguous IO byte buffer
 
-<img src="https://raw.githubusercontent.com/Zk2u/cynosure/main/docs/charts/bipbuffer-throughput.png" alt="bip_buffer sustained grant cycles: bbqueue 213 Mops/s, cynosure 137 Mops/s" width="100%">
+<img src="https://raw.githubusercontent.com/Zk2u/cynosure/main/docs/charts/bipbuffer-throughput.svg" alt="bip_buffer sustained grant cycles: bbqueue 213 Mops/s, cynosure 137 Mops/s" width="100%">
 
-<img src="https://raw.githubusercontent.com/Zk2u/cynosure/main/docs/charts/bipbuffer-latency-dist.png" alt="bip_buffer grant cycle latency distribution to p99: bbqueue 5.3 ns at p50, cynosure 7.6 ns" width="100%">
+<img src="https://raw.githubusercontent.com/Zk2u/cynosure/main/docs/charts/bipbuffer-latency-dist.svg" alt="bip_buffer grant cycle latency distribution to p99: bbqueue 5.3 ns at p50, cynosure 7.6 ns" width="100%">
 
 ### `oneshot` — single-value reply channel
 
-<img src="https://raw.githubusercontent.com/Zk2u/cynosure/main/docs/charts/oneshot-throughput.png" alt="oneshot sustained create send receive: cynosure 81 Mops/s, tokio 79.6, futures-channel 63.4" width="100%">
+<img src="https://raw.githubusercontent.com/Zk2u/cynosure/main/docs/charts/oneshot-throughput.svg" alt="oneshot sustained create send receive: cynosure 81 Mops/s, tokio 79.6, futures-channel 63.4" width="100%">
 
-<img src="https://raw.githubusercontent.com/Zk2u/cynosure/main/docs/charts/oneshot-latency-dist.png" alt="oneshot latency distribution to p99: cynosure 12.5 ns at p50, tokio 12.6, futures-channel 22.9" width="100%">
+<img src="https://raw.githubusercontent.com/Zk2u/cynosure/main/docs/charts/oneshot-latency-dist.svg" alt="oneshot latency distribution to p99: cynosure 12.5 ns at p50, tokio 12.6, futures-channel 22.9" width="100%">
 
 ### `site_c` — single-threaded primitives
 
 **`LocalMutex`**
 
-<img src="https://raw.githubusercontent.com/Zk2u/cynosure/main/docs/charts/mutex-throughput.png" alt="LocalMutex sustained lock and unlock: cynosure 3349 Mops/s, parking_lot 475, std Mutex 236" width="100%">
+<img src="https://raw.githubusercontent.com/Zk2u/cynosure/main/docs/charts/mutex-throughput.svg" alt="LocalMutex sustained lock and unlock: cynosure 3349 Mops/s, parking_lot 475, std Mutex 236" width="100%">
 
-<img src="https://raw.githubusercontent.com/Zk2u/cynosure/main/docs/charts/mutex-latency-dist.png" alt="LocalMutex latency distribution to p99: cynosure 0.33 ns at p50 and 0.41 at p99, parking_lot near 2.4, std Mutex 4.3" width="100%">
+<img src="https://raw.githubusercontent.com/Zk2u/cynosure/main/docs/charts/mutex-latency-dist.svg" alt="LocalMutex latency distribution to p99: cynosure 0.33 ns at p50 and 0.41 at p99, parking_lot near 2.4, std Mutex 4.3" width="100%">
 
 **`LocalRwLock`**
 
-<img src="https://raw.githubusercontent.com/Zk2u/cynosure/main/docs/charts/rwlock-throughput.png" alt="LocalRwLock sustained read lock: cynosure 480 Mops/s, parking_lot 318, std RwLock 234" width="100%">
+<img src="https://raw.githubusercontent.com/Zk2u/cynosure/main/docs/charts/rwlock-throughput.svg" alt="LocalRwLock sustained read lock: cynosure 480 Mops/s, parking_lot 318, std RwLock 234" width="100%">
 
-<img src="https://raw.githubusercontent.com/Zk2u/cynosure/main/docs/charts/rwlock-latency-dist.png" alt="LocalRwLock read latency distribution to p99: cynosure 2.4 ns at p50, parking_lot 3.5, std 4.9" width="100%">
+<img src="https://raw.githubusercontent.com/Zk2u/cynosure/main/docs/charts/rwlock-latency-dist.svg" alt="LocalRwLock read latency distribution to p99: cynosure 2.4 ns at p50, parking_lot 3.5, std 4.9" width="100%">
 
 **`LocalSemaphore`**
 
-<img src="https://raw.githubusercontent.com/Zk2u/cynosure/main/docs/charts/semaphore-throughput.png" alt="LocalSemaphore sustained acquire and release: cynosure 562 Mops/s, async-lock 169, tokio 159" width="100%">
+<img src="https://raw.githubusercontent.com/Zk2u/cynosure/main/docs/charts/semaphore-throughput.svg" alt="LocalSemaphore sustained acquire and release: cynosure 562 Mops/s, async-lock 169, tokio 159" width="100%">
 
-<img src="https://raw.githubusercontent.com/Zk2u/cynosure/main/docs/charts/semaphore-latency-dist.png" alt="LocalSemaphore latency distribution to p99: cynosure 2.0 ns at p50, async-lock 5.8, tokio 6.5" width="100%">
+<img src="https://raw.githubusercontent.com/Zk2u/cynosure/main/docs/charts/semaphore-latency-dist.svg" alt="LocalSemaphore latency distribution to p99: cynosure 2.0 ns at p50, async-lock 5.8, tokio 6.5" width="100%">
 
 **`LocalBufferPool`**
 
-<img src="https://raw.githubusercontent.com/Zk2u/cynosure/main/docs/charts/pool-throughput.png" alt="LocalBufferPool sustained acquire and return: lockfree-object-pool 233 Mops/s, object-pool 200, cynosure 143" width="100%">
+<img src="https://raw.githubusercontent.com/Zk2u/cynosure/main/docs/charts/pool-throughput.svg" alt="LocalBufferPool sustained acquire and return: lockfree-object-pool 233 Mops/s, object-pool 200, cynosure 143" width="100%">
 
-<img src="https://raw.githubusercontent.com/Zk2u/cynosure/main/docs/charts/pool-latency-dist.png" alt="LocalBufferPool latency distribution to p99: lockfree-object-pool 4.4 ns at p50, object-pool 5.5, cynosure 5.6" width="100%">
+<img src="https://raw.githubusercontent.com/Zk2u/cynosure/main/docs/charts/pool-latency-dist.svg" alt="LocalBufferPool latency distribution to p99: lockfree-object-pool 4.4 ns at p50, object-pool 5.5, cynosure 5.6" width="100%">
 
 **`Queue<T, N>`**
 
-<img src="https://raw.githubusercontent.com/Zk2u/cynosure/main/docs/charts/queue-throughput.png" alt="Queue sustained push and pop on a warm queue: VecDeque 979 Mops/s, cynosure Queue 392" width="100%">
+<img src="https://raw.githubusercontent.com/Zk2u/cynosure/main/docs/charts/queue-throughput.svg" alt="Queue sustained push and pop on a warm queue: VecDeque 979 Mops/s, cynosure Queue 392" width="100%">
 
-<img src="https://raw.githubusercontent.com/Zk2u/cynosure/main/docs/charts/queue-latency-dist.png" alt="Queue push and pop latency distribution to p99 on a warm queue: VecDeque 0.98 ns at p50, cynosure Queue 2.52" width="100%">
+<img src="https://raw.githubusercontent.com/Zk2u/cynosure/main/docs/charts/queue-latency-dist.svg" alt="Queue push and pop latency distribution to p99 on a warm queue: VecDeque 0.98 ns at p50, cynosure Queue 2.52" width="100%">
 
 Several charts above are **not** wins, and they stay in on purpose:
 
