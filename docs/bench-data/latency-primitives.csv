@@ -1,0 +1,114 @@
+# Latency distributions, written by `cargo bench --bench latency_dist`.
+# Columns: chart,series,percentile,ns
+#title:ringbuf-latency-dist:RingBuf — cross-thread handoff latency
+#subtitle:ringbuf-latency-dist:true per-message one-way latency, 2 threads busy-spinning · lower and flatter is better
+#title:oneshot-latency-dist:oneshot — create + send + receive
+#subtitle:oneshot-latency-dist:per-op cost over batches of 512 · to p99 — past that the samples measure OS preemption, not the primitive
+#title:triplebuffer-latency-dist:triple_buffer — publish + next rotation
+#subtitle:triplebuffer-latency-dist:per-op cost over batches of 512 · to p99 — past that the samples measure OS preemption, not the primitive
+#title:bipbuffer-latency-dist:bip_buffer — reserve + commit + read + release
+#subtitle:bipbuffer-latency-dist:per-op cost over batches of 512 · to p99 — past that the samples measure OS preemption, not the primitive
+#title:mutex-latency-dist:LocalMutex — lock + unlock
+#subtitle:mutex-latency-dist:per-op cost over batches of 512 · to p99 — past that the samples measure OS preemption, not the primitive
+#title:rwlock-latency-dist:LocalRwLock — read lock + unlock
+#subtitle:rwlock-latency-dist:per-op cost over batches of 512 · to p99 — past that the samples measure OS preemption, not the primitive
+#title:semaphore-latency-dist:LocalSemaphore — acquire + release
+#subtitle:semaphore-latency-dist:per-op cost over batches of 512 · to p99 — past that the samples measure OS preemption, not the primitive
+#title:pool-latency-dist:LocalBufferPool — acquire + return
+#subtitle:pool-latency-dist:per-op cost over batches of 512 · to p99 — past that the samples measure OS preemption, not the primitive
+#title:queue-latency-dist:Queue<T, N> — push + pop, warm queue
+#subtitle:queue-latency-dist:per-op cost over batches of 512 · to p99 — past that the samples measure OS preemption, not the primitive
+ringbuf-latency-dist,cynosure RingBuf,0.5,62.500
+ringbuf-latency-dist,cynosure RingBuf,0.75,62.500
+ringbuf-latency-dist,cynosure RingBuf,0.9,62.500
+ringbuf-latency-dist,cynosure RingBuf,0.99,83.500
+ringbuf-latency-dist,cynosure RingBuf,0.999,83.500
+ringbuf-latency-dist,crossbeam,0.5,104.000
+ringbuf-latency-dist,crossbeam,0.75,125.000
+ringbuf-latency-dist,crossbeam,0.9,125.000
+ringbuf-latency-dist,crossbeam,0.99,146.000
+ringbuf-latency-dist,crossbeam,0.999,229.000
+oneshot-latency-dist,cynosure oneshot,0.5,12.451
+oneshot-latency-dist,cynosure oneshot,0.75,12.451
+oneshot-latency-dist,cynosure oneshot,0.9,12.613
+oneshot-latency-dist,cynosure oneshot,0.99,15.705
+oneshot-latency-dist,tokio,0.5,12.695
+oneshot-latency-dist,tokio,0.75,12.695
+oneshot-latency-dist,tokio,0.9,12.857
+oneshot-latency-dist,tokio,0.99,16.033
+oneshot-latency-dist,futures-channel,0.5,16.031
+oneshot-latency-dist,futures-channel,0.75,16.033
+oneshot-latency-dist,futures-channel,0.9,16.195
+oneshot-latency-dist,futures-channel,0.99,20.184
+bipbuffer-latency-dist,cynosure bip_buffer,0.5,7.568
+bipbuffer-latency-dist,cynosure bip_buffer,0.75,7.650
+bipbuffer-latency-dist,cynosure bip_buffer,0.9,7.650
+bipbuffer-latency-dist,cynosure bip_buffer,0.99,9.604
+bipbuffer-latency-dist,bbqueue,0.5,5.453
+bipbuffer-latency-dist,bbqueue,0.75,5.533
+bipbuffer-latency-dist,bbqueue,0.9,5.535
+bipbuffer-latency-dist,bbqueue,0.99,6.836
+triplebuffer-latency-dist,cynosure triple_buffer,0.5,8.383
+triplebuffer-latency-dist,cynosure triple_buffer,0.75,8.463
+triplebuffer-latency-dist,cynosure triple_buffer,0.9,8.545
+triplebuffer-latency-dist,cynosure triple_buffer,0.99,10.578
+triplebuffer-latency-dist,crossbeam-recycle,0.5,17.822
+triplebuffer-latency-dist,crossbeam-recycle,0.75,17.984
+triplebuffer-latency-dist,crossbeam-recycle,0.9,18.066
+triplebuffer-latency-dist,crossbeam-recycle,0.99,22.625
+mutex-latency-dist,cynosure LocalMutex,0.5,0.326
+mutex-latency-dist,cynosure LocalMutex,0.75,0.326
+mutex-latency-dist,cynosure LocalMutex,0.9,0.406
+mutex-latency-dist,cynosure LocalMutex,0.99,0.408
+mutex-latency-dist,parking_lot,0.5,2.279
+mutex-latency-dist,parking_lot,0.75,2.279
+mutex-latency-dist,parking_lot,0.9,2.359
+mutex-latency-dist,parking_lot,0.99,2.930
+mutex-latency-dist,std::sync::Mutex,0.5,4.232
+mutex-latency-dist,std::sync::Mutex,0.75,4.232
+mutex-latency-dist,std::sync::Mutex,0.9,4.312
+mutex-latency-dist,std::sync::Mutex,0.99,5.289
+rwlock-latency-dist,cynosure LocalRwLock,0.5,2.441
+rwlock-latency-dist,cynosure LocalRwLock,0.75,2.441
+rwlock-latency-dist,cynosure LocalRwLock,0.9,2.441
+rwlock-latency-dist,cynosure LocalRwLock,0.99,3.012
+rwlock-latency-dist,parking_lot,0.5,3.500
+rwlock-latency-dist,parking_lot,0.75,3.580
+rwlock-latency-dist,parking_lot,0.9,3.582
+rwlock-latency-dist,parking_lot,0.99,4.475
+rwlock-latency-dist,std::sync::RwLock,0.5,4.801
+rwlock-latency-dist,std::sync::RwLock,0.75,4.803
+rwlock-latency-dist,std::sync::RwLock,0.9,4.883
+rwlock-latency-dist,std::sync::RwLock,0.99,5.941
+semaphore-latency-dist,cynosure LocalSemaphore,0.5,1.953
+semaphore-latency-dist,cynosure LocalSemaphore,0.75,2.035
+semaphore-latency-dist,cynosure LocalSemaphore,0.9,2.115
+semaphore-latency-dist,cynosure LocalSemaphore,0.99,2.523
+semaphore-latency-dist,tokio,0.5,6.430
+semaphore-latency-dist,tokio,0.75,6.510
+semaphore-latency-dist,tokio,0.9,6.592
+semaphore-latency-dist,tokio,0.99,8.057
+semaphore-latency-dist,async-lock,0.5,5.777
+semaphore-latency-dist,async-lock,0.75,5.779
+semaphore-latency-dist,async-lock,0.9,5.859
+semaphore-latency-dist,async-lock,0.99,7.242
+pool-latency-dist,cynosure LocalBufferPool,0.5,5.615
+pool-latency-dist,cynosure LocalBufferPool,0.75,5.615
+pool-latency-dist,cynosure LocalBufferPool,0.9,5.697
+pool-latency-dist,cynosure LocalBufferPool,0.99,7.000
+pool-latency-dist,object-pool,0.5,5.291
+pool-latency-dist,object-pool,0.75,5.371
+pool-latency-dist,object-pool,0.9,5.615
+pool-latency-dist,object-pool,0.99,6.836
+pool-latency-dist,lockfree-object-pool,0.5,4.395
+pool-latency-dist,lockfree-object-pool,0.75,4.395
+pool-latency-dist,lockfree-object-pool,0.9,4.477
+pool-latency-dist,lockfree-object-pool,0.99,5.453
+queue-latency-dist,cynosure Queue,0.5,2.523
+queue-latency-dist,cynosure Queue,0.75,2.604
+queue-latency-dist,cynosure Queue,0.9,2.605
+queue-latency-dist,cynosure Queue,0.99,3.254
+queue-latency-dist,VecDeque,0.5,0.977
+queue-latency-dist,VecDeque,0.75,1.057
+queue-latency-dist,VecDeque,0.9,1.059
+queue-latency-dist,VecDeque,0.99,1.221

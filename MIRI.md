@@ -1,6 +1,6 @@
-# Miri Setup and Usage Guide for LocalCell
+# Miri Setup and Usage Guide for cynosure
 
-This guide explains how to use [Miri](https://github.com/rust-lang/miri) to detect undefined behavior and memory safety issues in the LocalCell project.
+This guide explains how to use [Miri](https://github.com/rust-lang/miri) to detect undefined behavior and memory safety issues in cynosure's `unsafe`-heavy paths. (Some examples below are historical and reference the removed `LocalCell` type, but the techniques apply to the current `Queue`, `RingBuf`, `triple_buffer`, and lock primitives.)
 
 ## What is Miri?
 

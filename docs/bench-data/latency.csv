@@ -1,0 +1,43 @@
+# Latency distributions, written by `cargo bench --bench control_plane`.
+# Regenerate charts: cargo run --manifest-path tools/chartgen/Cargo.toml
+# Columns: chart,series,percentile,ns
+#title:mpsc-light-latency-dist:mpsc_light — latency under paced fan-in
+#subtitle:mpsc-light-latency-dist:8 producers @1 µs into 1 consumer · capacity 256 · lower and flatter is better
+#title:mpsc-light-reactor-dist:mpsc_light — delivery latency inside a shared reactor
+#subtitle:mpsc-light-reactor-dist:consumer sharing a single-threaded executor with 4 compute tasks · lower and flatter is better
+mpsc-light-latency-dist,cynosure-light,0.5,5916
+mpsc-light-latency-dist,cynosure-light,0.75,11250
+mpsc-light-latency-dist,cynosure-light,0.9,19417
+mpsc-light-latency-dist,cynosure-light,0.99,43166
+mpsc-light-latency-dist,cynosure-light,0.999,69333
+mpsc-light-latency-dist,cynosure-light,0.9999,93250
+mpsc-light-latency-dist,cynosure-light,0.99999,120750
+mpsc-light-latency-dist,kanal-async,0.5,40041
+mpsc-light-latency-dist,kanal-async,0.75,55500
+mpsc-light-latency-dist,kanal-async,0.9,123458
+mpsc-light-latency-dist,kanal-async,0.99,2689375
+mpsc-light-latency-dist,kanal-async,0.999,5158250
+mpsc-light-latency-dist,kanal-async,0.9999,6613708
+mpsc-light-latency-dist,kanal-async,0.99999,6630916
+mpsc-light-latency-dist,tokio-mpsc,0.5,82292
+mpsc-light-latency-dist,tokio-mpsc,0.75,100792
+mpsc-light-latency-dist,tokio-mpsc,0.9,135375
+mpsc-light-latency-dist,tokio-mpsc,0.99,138417
+mpsc-light-latency-dist,tokio-mpsc,0.999,151958
+mpsc-light-latency-dist,tokio-mpsc,0.9999,153083
+mpsc-light-latency-dist,tokio-mpsc,0.99999,153875
+mpsc-light-reactor-dist,cynosure-light,0.5,167
+mpsc-light-reactor-dist,cynosure-light,0.75,167
+mpsc-light-reactor-dist,cynosure-light,0.9,208
+mpsc-light-reactor-dist,cynosure-light,0.99,292
+mpsc-light-reactor-dist,cynosure-light,0.999,417
+mpsc-light-reactor-dist,kanal-async,0.5,292
+mpsc-light-reactor-dist,kanal-async,0.75,292
+mpsc-light-reactor-dist,kanal-async,0.9,292
+mpsc-light-reactor-dist,kanal-async,0.99,375
+mpsc-light-reactor-dist,kanal-async,0.999,8042
+mpsc-light-reactor-dist,tokio-mpsc,0.5,208
+mpsc-light-reactor-dist,tokio-mpsc,0.75,250
+mpsc-light-reactor-dist,tokio-mpsc,0.9,291
+mpsc-light-reactor-dist,tokio-mpsc,0.99,292
+mpsc-light-reactor-dist,tokio-mpsc,0.999,1625

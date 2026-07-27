@@ -1,3 +1,10 @@
+//! `Queue<T, N>` — a double-ended queue that stores up to `N` items inline
+//! before spilling to a `VecDeque`.
+//!
+//! The point is **avoiding the allocation** for the short-lived, small queues a
+//! runtime is full of (waiter lists, drain buffers) — not beating `VecDeque` at
+//! steady-state churn, where its tighter ring wins.
+
 use std::{collections::VecDeque, mem::MaybeUninit};
 
 use crate::hints::{likely, unlikely};
@@ -493,12 +500,18 @@ impl<T, const N: usize> Drop for Queue<T, N> {
 
 /// Iterator that yields references to elements in the queue
 pub enum Iter<'a, T, const N: usize> {
+    /// Iterating the inline storage: a slice plus the ring cursor.
     Inline {
+        /// The inline backing store; only `remaining` slots from `head` are live.
         buf: &'a [std::mem::MaybeUninit<T>; N],
+        /// Index of the next element to yield.
         head: usize,
+        /// Elements still to yield.
         remaining: usize,
+        /// Ties the borrow to `T`.
         _phantom: std::marker::PhantomData<&'a T>,
     },
+    /// Iterating after the queue spilled to the heap.
     Heap(std::collections::vec_deque::Iter<'a, T>),
 }
 
@@ -589,12 +602,18 @@ impl<'a, T, const N: usize> IntoIterator for &'a Queue<T, N> {
 
 /// Mutable iterator over elements in the queue
 pub enum IterMut<'a, T, const N: usize> {
+    /// Iterating the inline storage: a slice plus the ring cursor.
     Inline {
+        /// The inline backing store; only `remaining` slots from `head` are live.
         buf: &'a mut [MaybeUninit<T>; N],
+        /// Index of the next element to yield.
         head: usize,
+        /// Elements still to yield.
         remaining: usize,
+        /// Ties the borrow to `T`.
         _phantom: std::marker::PhantomData<&'a mut T>,
     },
+    /// Iterating after the queue spilled to the heap.
     Heap(std::collections::vec_deque::IterMut<'a, T>),
 }
 

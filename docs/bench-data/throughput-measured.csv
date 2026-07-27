@@ -1,0 +1,43 @@
+# Sustained throughput, written by `cargo bench --bench primitives_throughput`.
+# A separate measurement from the latency charts, not latency inverted.
+# Columns: chart,label,value,hero
+#title:oneshot-throughput:oneshot — sustained create + send + receive
+#subtitle:oneshot-throughput:steady-state channel churn · allocator-bound · higher is better
+#unit:oneshot-throughput:Mops/s
+#title:bipbuffer-throughput:bip_buffer — sustained grant cycles
+#subtitle:bipbuffer-throughput:reserve + commit + read + release · 256 B contiguous grants · higher is better
+#unit:bipbuffer-throughput:Mops/s
+#title:semaphore-throughput:LocalSemaphore — sustained acquire + release
+#subtitle:semaphore-throughput:uncontended · non-atomic single-core · higher is better
+#unit:semaphore-throughput:Mops/s
+#title:pool-throughput:LocalBufferPool — sustained acquire + return
+#subtitle:pool-throughput:4 KiB buffers recycled through the free list · higher is better
+#unit:pool-throughput:Mops/s
+#title:queue-throughput:Queue<T, N> — sustained push + pop, warm queue
+#subtitle:queue-throughput:steady state on a pre-sized queue — no allocation on either side · higher is better
+#unit:queue-throughput:Mops/s
+#title:mutex-throughput:LocalMutex — sustained lock + unlock
+#subtitle:mutex-throughput:single-threaded, non-atomic · usable across .await · higher is better
+#unit:mutex-throughput:Mops/s
+#title:rwlock-throughput:LocalRwLock — sustained read lock + unlock
+#subtitle:rwlock-throughput:single-threaded, non-atomic · write-preferring · higher is better
+#unit:rwlock-throughput:Mops/s
+oneshot-throughput,cynosure oneshot,80.88,1
+oneshot-throughput,tokio,79.57,0
+oneshot-throughput,futures-channel,62.46,0
+bipbuffer-throughput,cynosure bip_buffer,134.20,1
+bipbuffer-throughput,bbqueue,198.96,0
+semaphore-throughput,cynosure LocalSemaphore,561.78,1
+semaphore-throughput,tokio,155.05,0
+semaphore-throughput,async-lock,165.58,0
+pool-throughput,cynosure LocalBufferPool,142.59,1
+pool-throughput,object-pool,190.16,0
+pool-throughput,lockfree-object-pool,228.00,0
+queue-throughput,cynosure Queue,391.77,1
+queue-throughput,VecDeque,978.63,0
+mutex-throughput,cynosure LocalMutex,3349.10,1
+mutex-throughput,parking_lot,474.80,0
+mutex-throughput,std::sync::Mutex,235.85,0
+rwlock-throughput,cynosure LocalRwLock,433.23,1
+rwlock-throughput,parking_lot,307.32,0
+rwlock-throughput,std::sync::RwLock,221.92,0

@@ -7,33 +7,13 @@
 //! recycling a fixed pool of 3 owned buffers, mirroring the triple buffer's
 //! three buffers and depth-1 backpressure.
 
-use std::{
-    future::Future,
-    pin::Pin,
-    task::{Context, Poll},
-    thread,
-};
+use std::thread;
 
 use criterion::{
     BatchSize, BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main,
 };
 use cynosure::site_d::triplebuffer::{AlignedBuffer, triple_buffer};
 use futures::executor::block_on;
-
-/// Drive a future to completion by busy-spinning (no thread parking) — the
-/// lock-free coordination ceiling, comparable to `try_*` spin loops.
-fn spin_on<F: Future>(mut fut: F) -> F::Output {
-    let waker = futures::task::noop_waker();
-    let mut cx = Context::from_waker(&waker);
-    // SAFETY: `fut` is not moved after pinning.
-    let mut fut = unsafe { Pin::new_unchecked(&mut fut) };
-    loop {
-        match fut.as_mut().poll(&mut cx) {
-            Poll::Ready(v) => return v,
-            Poll::Pending => std::hint::spin_loop(),
-        }
-    }
-}
 
 // Total application-level bytes streamed per measured iteration (the number of
 // handoffs is this divided by the buffer size, capped so tiny buffers don't
@@ -140,14 +120,35 @@ fn bench_spin(c: &mut Criterion) {
                     for i in 0..n {
                         wbuf.capacity_mut().fill((i & 0xff) as u8);
                         wbuf.set_len(size);
-                        wbuf = spin_on(w.publish(wbuf));
+                        // Sync spin: retry try_publish until the middle frees
+                        // (mirrors crossbeam's try_send loop below).
+                        loop {
+                            match w.try_publish(wbuf) {
+                                Ok(next) => {
+                                    wbuf = next;
+                                    break;
+                                }
+                                Err(b) => {
+                                    wbuf = b;
+                                    std::hint::spin_loop();
+                                }
+                            }
+                        }
                     }
                 });
                 let cons = thread::spawn(move || {
                     let mut prev = None;
                     let mut acc = 0u64;
                     for _ in 0..n {
-                        let buf = spin_on(r.next(prev.take()));
+                        let buf = loop {
+                            match r.try_next(prev.take()) {
+                                Ok(buf) => break buf,
+                                Err(p) => {
+                                    prev = p;
+                                    std::hint::spin_loop();
+                                }
+                            }
+                        };
                         acc = acc.wrapping_add(buf.iter().map(|&x| x as u64).sum::<u64>());
                         prev = Some(buf);
                     }
@@ -223,25 +224,24 @@ fn bench_spin(c: &mut Criterion) {
 
 /// Latency of the core rotation, isolated. Single thread, fast path: the buffer
 /// is never filled or read, so this measures the rotation cost (pointer swaps +
-/// atomics + a no-op wake + the cost of polling a ready future) with no memory
-/// bandwidth or thread parking. Buffer size is irrelevant to the rotation.
+/// atomics + a no-op wake) with no memory bandwidth or thread parking. Buffer
+/// size is irrelevant to the rotation.
 fn bench_rotation_latency(c: &mut Criterion) {
     let mut g = c.benchmark_group("TripleBuffer rotation latency");
 
     // publish (1 rotation) + next (1 rotation) per iteration; the two alternate
     // so each stays on its ready fast path (publish sees middle_free, next sees
-    // has_unread).
+    // has_unread). Uses the sync `try_*` API for an apples-to-apples comparison
+    // with crossbeam's direct `try_send`/`try_recv` below.
     {
         let (mut w, mut r, wbuf0) = triple_buffer::<u8>(4096);
         let mut wbuf = Some(wbuf0);
         let mut prev: Option<AlignedBuffer<u8>> = None;
-        // NB: this includes the cost of polling the async futures (the triple
-        // buffer has no sync API); crossbeam below uses its direct sync calls.
         g.bench_function("cynosure publish+next cycle", |b| {
             b.iter(|| {
                 let buf = wbuf.take().unwrap();
-                wbuf = Some(spin_on(w.publish(buf)));
-                prev = Some(spin_on(r.next(prev.take())));
+                wbuf = Some(w.try_publish(buf).expect("middle free"));
+                prev = Some(r.try_next(prev.take()).expect("unread available"));
             });
         });
     }
@@ -270,5 +270,50 @@ fn bench_rotation_latency(c: &mut Criterion) {
     g.finish();
 }
 
-criterion_group!(benches, bench, bench_spin, bench_rotation_latency);
+// ============================================================================
+// vs the `triple_buffer` crate (crates.io) — the name-brand competitor.
+//
+// Semantics differ: cynosure's is a lossless depth-1 handoff (`try_publish`
+// backpressures until the reader takes the middle buffer); the crate's is
+// lossy latest-value (publish always succeeds, the reader may skip frames).
+// Rotation cost is directly comparable; the 2-thread row therefore counts
+// bytes the reader actually CONSUMED, which is the honest common currency.
+// ============================================================================
+fn bench_vs_triple_buffer_crate(c: &mut Criterion) {
+    let mut g = c.benchmark_group("TripleBuffer vs triple_buffer crate");
+
+    // --- rotation cost: one publish + one consume (2 rotations) per iter ---
+    {
+        let (mut w, mut r, wbuf0) = triple_buffer::<u8>(4096);
+        let mut wbuf = Some(wbuf0);
+        let mut prev: Option<AlignedBuffer<u8>> = None;
+        g.bench_function("cynosure publish+next", |b| {
+            b.iter(|| {
+                let buf = wbuf.take().unwrap();
+                wbuf = Some(w.try_publish(buf).expect("middle free"));
+                prev = Some(r.try_next(prev.take()).expect("unread available"));
+            });
+        });
+    }
+    {
+        // Rotation is size-independent for both (index/pointer swaps).
+        let (mut inp, mut out) = ::triple_buffer::TripleBuffer::new(&0u64).split();
+        g.bench_function("triple_buffer crate publish+update", |b| {
+            b.iter(|| {
+                inp.publish();
+                black_box(out.update());
+            });
+        });
+    }
+
+    g.finish();
+}
+
+criterion_group!(
+    benches,
+    bench,
+    bench_spin,
+    bench_rotation_latency,
+    bench_vs_triple_buffer_crate
+);
 criterion_main!(benches);

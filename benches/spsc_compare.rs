@@ -748,6 +748,175 @@ fn bench_async(c: &mut Criterion) {
     g.finish();
 }
 
+/// Cross-thread async: producer and consumer each run on their OWN thread and
+/// executor, communicating purely through the async API (`push().await` /
+/// `pop().await`) with real cross-thread wakeups. This is the headline
+/// thread-per-core use case and the path the F1/F2 wakeup fixes protect. Every
+/// contender is driven by `futures::executor::block_on` (parks on Pending).
+fn bench_async_2thread(c: &mut Criterion) {
+    let mut g = c.benchmark_group("SPSC Async Throughput (2 threads)");
+    g.throughput(Throughput::Elements(ITEMS));
+
+    g.bench_function("cynosure", |b| {
+        b.iter(|| {
+            let (mut p, mut cons) = RingBuf::<u32>::new(CAP).split();
+            let pt = std::thread::spawn(move || {
+                futures::executor::block_on(async move {
+                    for i in 0..ITEMS {
+                        p.push(i as u32).await;
+                    }
+                })
+            });
+            let ct = std::thread::spawn(move || {
+                futures::executor::block_on(async move {
+                    let mut acc = 0u64;
+                    for _ in 0..ITEMS {
+                        acc = acc.wrapping_add(cons.pop().await as u64);
+                    }
+                    black_box(acc);
+                })
+            });
+            pt.join().unwrap();
+            ct.join().unwrap();
+        })
+    });
+
+    g.bench_function("tokio-mpsc", |b| {
+        b.iter(|| {
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<u32>(CAP);
+            let pt = std::thread::spawn(move || {
+                futures::executor::block_on(async move {
+                    for i in 0..ITEMS {
+                        tx.send(i as u32).await.unwrap();
+                    }
+                })
+            });
+            let ct = std::thread::spawn(move || {
+                futures::executor::block_on(async move {
+                    let mut acc = 0u64;
+                    for _ in 0..ITEMS {
+                        acc = acc.wrapping_add(rx.recv().await.unwrap() as u64);
+                    }
+                    black_box(acc);
+                })
+            });
+            pt.join().unwrap();
+            ct.join().unwrap();
+        })
+    });
+
+    g.bench_function("flume", |b| {
+        b.iter(|| {
+            let (tx, rx) = flume::bounded::<u32>(CAP);
+            let pt = std::thread::spawn(move || {
+                futures::executor::block_on(async move {
+                    for i in 0..ITEMS {
+                        tx.send_async(i as u32).await.unwrap();
+                    }
+                })
+            });
+            let ct = std::thread::spawn(move || {
+                futures::executor::block_on(async move {
+                    let mut acc = 0u64;
+                    for _ in 0..ITEMS {
+                        acc = acc.wrapping_add(rx.recv_async().await.unwrap() as u64);
+                    }
+                    black_box(acc);
+                })
+            });
+            pt.join().unwrap();
+            ct.join().unwrap();
+        })
+    });
+
+    g.bench_function("kanal", |b| {
+        b.iter(|| {
+            let (tx, rx) = kanal::bounded_async::<u32>(CAP);
+            let pt = std::thread::spawn(move || {
+                futures::executor::block_on(async move {
+                    for i in 0..ITEMS {
+                        tx.send(i as u32).await.unwrap();
+                    }
+                })
+            });
+            let ct = std::thread::spawn(move || {
+                futures::executor::block_on(async move {
+                    let mut acc = 0u64;
+                    for _ in 0..ITEMS {
+                        acc = acc.wrapping_add(rx.recv().await.unwrap() as u64);
+                    }
+                    black_box(acc);
+                })
+            });
+            pt.join().unwrap();
+            ct.join().unwrap();
+        })
+    });
+
+    g.finish();
+}
+
+/// Cross-thread async round-trip latency: a strict ping-pong over two ring
+/// buffers. Every message parks one side and is woken by the other across
+/// cores, so this measures the cross-thread async wakeup round-trip directly
+/// (and stress-tests the F1/F2 path — millions of cross-thread wakeups).
+fn bench_async_2thread_latency(c: &mut Criterion) {
+    use std::time::Instant;
+    let mut g = c.benchmark_group("SPSC Async Round-trip Latency (2 threads)");
+
+    g.bench_function("cynosure", |b| {
+        b.iter_custom(|iters| {
+            let (mut req_tx, mut req_rx) = RingBuf::<u32>::new(CAP).split();
+            let (mut resp_tx, mut resp_rx) = RingBuf::<u32>::new(CAP).split();
+            let server = std::thread::spawn(move || {
+                futures::executor::block_on(async move {
+                    for _ in 0..iters {
+                        let v = req_rx.pop().await;
+                        resp_tx.push(v).await;
+                    }
+                })
+            });
+            let start = Instant::now();
+            futures::executor::block_on(async move {
+                for i in 0..iters {
+                    req_tx.push(i as u32).await;
+                    black_box(resp_rx.pop().await);
+                }
+            });
+            let elapsed = start.elapsed();
+            server.join().unwrap();
+            elapsed
+        })
+    });
+
+    g.bench_function("tokio-mpsc", |b| {
+        b.iter_custom(|iters| {
+            let (req_tx, mut req_rx) = tokio::sync::mpsc::channel::<u32>(CAP);
+            let (resp_tx, mut resp_rx) = tokio::sync::mpsc::channel::<u32>(CAP);
+            let server = std::thread::spawn(move || {
+                futures::executor::block_on(async move {
+                    for _ in 0..iters {
+                        let v = req_rx.recv().await.unwrap();
+                        resp_tx.send(v).await.unwrap();
+                    }
+                })
+            });
+            let start = Instant::now();
+            futures::executor::block_on(async move {
+                for i in 0..iters {
+                    req_tx.send(i as u32).await.unwrap();
+                    black_box(resp_rx.recv().await.unwrap());
+                }
+            });
+            let elapsed = start.elapsed();
+            server.join().unwrap();
+            elapsed
+        })
+    });
+
+    g.finish();
+}
+
 criterion_group!(
     benches,
     bench_latency,
@@ -755,6 +924,8 @@ criterion_group!(
     bench_throughput_threaded,
     bench_throughput_threaded_blocking,
     bench_threaded_large,
+    bench_async_2thread,
+    bench_async_2thread_latency,
     bench_async
 );
 criterion_main!(benches);

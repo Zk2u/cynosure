@@ -1,0 +1,13 @@
+# Standalone (own workspace) so the library stays dependency-free and this tool
+# never enters cynosure's dependency graph.
+[workspace]
+
+[package]
+name = "chartgen"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Renders cynosure's benchmark results as branded SVG charts. No dependencies."
+
+[dependencies]
+resvg = "0.47.0"

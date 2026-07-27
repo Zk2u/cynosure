@@ -1,11 +1,13 @@
 [package]
 name = "cynosure"
 description = "High performance data structures & primitives from beyond the Blackwall"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 license = "MIT"
-authors = ["zk2u <zk2u@pm.me>"]
+authors = ["zk2u <hey@zk2u.com>"]
 repository = "https://github.com/zk2u/cynosure"
+# Not part of the published crate.
+exclude = ["tools/*", "attic/*", "rust-channel-benchmarks/*", "docs/*"]
 
 [features]
 default = ["site_c", "site_d"]
@@ -13,17 +15,32 @@ default = ["site_c", "site_d"]
 hints = []
 
 # activates all site_c functionality
-site_c = ["mutex", "queue", "rwlock"]
+site_c = ["mutex", "queue", "rwlock", "semaphore", "pool"]
 mutex = ["queue", "hints"]
 queue = ["hints"]
 rwlock = ["queue", "hints"]
+semaphore = ["queue", "hints"]
+pool = ["semaphore", "buffer", "hints"]
 
 # activates all site_d functionality
-site_d = ["ringbuf", "triplebuffer"]
-ringbuf = ["hints", "futures"]
-triplebuffer = ["hints", "futures"]
+site_d = ["ringbuf", "triplebuffer", "oneshot", "bipbuffer", "mpsc_light"]
+ringbuf = ["hints"]
+triplebuffer = ["hints", "buffer"]
+bipbuffer = ["hints", "buffer"]
+oneshot = ["hints"]
+# Lightweight single-consumer lock-free MPSC (control channels)
+mpsc_light = ["hints", "queue"]
+# Shared aligned-IO buffer type (AlignedBuffer/Zeroable)
+buffer = []
 
 monoio-0_2 = ["dep:monoio"]
+
+# Benchmarks measure optimized, cross-crate-inlined code (as a release+LTO user
+# would build) — without this, cynosure's lean inlined ops don't inline across
+# the crate boundary and read artificially slow.
+[profile.bench]
+lto = true
+codegen-units = 1
 
 [dev-dependencies]
 futures = "0.3.31"
@@ -37,9 +54,17 @@ kanal = "0.1"
 ringbuf = "0.4"
 rtrb = "0.3"
 thingbuf = "0.1"
+# new-primitive competitors
+oneshot = "0.1"
+async-lock = "3"
+object-pool = "0.6"
+lockfree-object-pool = "0.1"
+bbqueue = "0.5"
+triple_buffer = "9.0.0"
+async-oneshot = "0.5.9"
+catty = "0.1.5"
 
 [dependencies]
-futures = {version = "0.3.31", optional = true}
 monoio = { version = "0.2.4", optional = true }
 
 [[bench]]
@@ -51,6 +76,46 @@ path = "benches/queue.rs"
 name = "mutex"
 harness = false
 path = "benches/mutex.rs"
+
+[[bench]]
+name = "latency_dist"
+harness = false
+path = "benches/latency_dist.rs"
+
+[[bench]]
+name = "primitives_throughput"
+harness = false
+path = "benches/primitives_throughput.rs"
+
+[[bench]]
+name = "control_plane"
+harness = false
+path = "benches/control_plane.rs"
+
+[[bench]]
+name = "mpsc_light"
+harness = false
+path = "benches/mpsc_light.rs"
+
+[[bench]]
+name = "oneshot"
+harness = false
+path = "benches/oneshot.rs"
+
+[[bench]]
+name = "semaphore"
+harness = false
+path = "benches/semaphore.rs"
+
+[[bench]]
+name = "pool"
+harness = false
+path = "benches/pool.rs"
+
+[[bench]]
+name = "bipbuffer"
+harness = false
+path = "benches/bipbuffer.rs"
 
 [[bench]]
 name = "ringbuf_spsc"

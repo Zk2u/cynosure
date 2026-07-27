@@ -1,0 +1,64 @@
+# Benchmark results for every cynosure primitive. Regenerate the charts with:
+#   cargo run --manifest-path tools/chartgen/Cargo.toml
+#
+# Columns:   chart,label,value,hero
+# Directives: #title:<chart>:…  #subtitle:<chart>:…  #unit:<chart>:…
+#             #better:<chart>:lower   (default is higher-is-better)
+#
+# Source: `cargo bench` on Apple M4 Max, release+LTO, each bench run in
+# isolation on a cool machine (a full back-to-back run thermally throttles the
+# later benches by ~15%). Full tables and caveats in BENCHMARKS.md.
+
+# ─── site_d :: RingBuf ────────────────────────────────────────────────────────
+#title:ringbuf-spsc-throughput:RingBuf — SPSC throughput, 2 threads
+#subtitle:ringbuf-spsc-throughput:busy-spin lock-free ceiling · u32 · capacity 1024 · higher is better
+#unit:ringbuf-spsc-throughput:Melem/s
+ringbuf-spsc-throughput,cynosure RingBuf,450,1
+ringbuf-spsc-throughput,rtrb,400,0
+ringbuf-spsc-throughput,ringbuf,220,0
+ringbuf-spsc-throughput,thingbuf,158,0
+ringbuf-spsc-throughput,std::mpsc,140,0
+ringbuf-spsc-throughput,crossbeam,137,0
+ringbuf-spsc-throughput,kanal,38,0
+ringbuf-spsc-throughput,flume,19,0
+
+#title:ringbuf-async-throughput:RingBuf — async SPSC, 2 threads / cross-core
+#subtitle:ringbuf-async-throughput:push().await / pop().await with real cross-thread wakeups · higher is better
+#unit:ringbuf-async-throughput:Melem/s
+ringbuf-async-throughput,cynosure RingBuf,90,1
+ringbuf-async-throughput,kanal,68,0
+ringbuf-async-throughput,tokio mpsc,15,0
+ringbuf-async-throughput,flume,13,0
+
+# ─── site_d :: mpsc_light ────────────────────────────────────────────────────
+#title:mpsc-light-fanin:mpsc_light — async fan-in, 16 producers
+#subtitle:mpsc-light-fanin:thread-per-core executor · capacity 256 · higher is better
+#unit:mpsc-light-fanin:Melem/s
+mpsc-light-fanin,cynosure mpsc_light,73,1
+mpsc-light-fanin,kanal,28,0
+mpsc-light-fanin,async-channel,4.2,0
+mpsc-light-fanin,flume,3.4,0
+mpsc-light-fanin,std::mpsc,3.2,0
+mpsc-light-fanin,tokio,0.6,0
+
+# ─── site_d :: triple_buffer ─────────────────────────────────────────────────
+
+#title:triplebuffer-bandwidth:triple_buffer — streamed bandwidth, 2 threads
+#subtitle:triplebuffer-bandwidth:64 KB buffers · zero-copy pointer swap · higher is better
+#unit:triplebuffer-bandwidth:GiB/s
+triplebuffer-bandwidth,cynosure triple_buffer,19.7,1
+triplebuffer-bandwidth,crossbeam-recycle,19.2,0
+
+# ─── site_d :: bip_buffer ────────────────────────────────────────────────────
+
+# ─── site_d :: oneshot ───────────────────────────────────────────────────────
+
+# ─── site_c :: LocalMutex ────────────────────────────────────────────────────
+
+# ─── site_c :: LocalRwLock ───────────────────────────────────────────────────
+
+# ─── site_c :: LocalSemaphore ────────────────────────────────────────────────
+
+# ─── site_c :: LocalBufferPool ───────────────────────────────────────────────
+
+# ─── site_c :: Queue ─────────────────────────────────────────────────────────

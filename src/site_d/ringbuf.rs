@@ -15,13 +15,12 @@ use std::{
     ptr,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicUsize, Ordering},
     },
     task::{Context, Poll},
 };
 
-use futures::task::AtomicWaker;
-
+use super::notify::WaiterSlot;
 use super::padding::CachePadded;
 use crate::{
     blocking::block_on,
@@ -44,26 +43,15 @@ struct RingBufferShared<T> {
     /// Read index (updated by consumer)
     read_index: CachePadded<AtomicUsize>,
 
-    /// Producer waker for async operations.
+    /// Per-direction flag-gated wakeup slots. See [`WaiterSlot`] for the
+    /// lost-wakeup contract; this primitive upholds it via the `SeqCst`
+    /// index-store publish on the hot path and the `SeqCst` re-check index load
+    /// in the parking futures below. On AArch64 those are stlr/ldar (no `dmb`);
+    /// on x86 the SC store carries the barrier.
     ///
-    /// `AtomicWaker` correctly synchronizes a single registering task (the
-    /// producer) against concurrent `wake()` calls from the consumer, so a
-    /// re-registration (e.g. a spurious re-poll inside `select!`) can never
-    /// race with the consumer taking the waker.
-    producer_waker: CachePadded<AtomicWaker>,
-    /// Consumer waker for async operations.
-    consumer_waker: CachePadded<AtomicWaker>,
-    /// Fast-path "a waker is registered" flags, so the hot path can skip the
-    /// wake when nobody is waiting.
-    ///
-    /// Wakeup ordering: the publish (index store) and the waker-flag load on
-    /// the hot path, and the symmetric flag store and re-check index load on a
-    /// parking peer, are all `SeqCst`. SeqCst store + SeqCst load forbids the
-    /// store-buffer (SB) outcome where the waiter sleeps *and* the waker misses
-    /// the flag — so no separate `fence` is needed. On AArch64 these are
-    /// stlr/ldar (no `dmb`); on x86 the SC store carries the barrier.
-    producer_waker_set: AtomicBool,
-    consumer_waker_set: AtomicBool,
+    /// [`WaiterSlot`]: super::notify::WaiterSlot
+    producer_slot: CachePadded<WaiterSlot>,
+    consumer_slot: CachePadded<WaiterSlot>,
 }
 
 unsafe impl<T: Send> Send for RingBufferShared<T> {}
@@ -127,10 +115,8 @@ impl<T> RingBuf<T> {
             layout,
             write_index: CachePadded::new(AtomicUsize::new(0)),
             read_index: CachePadded::new(AtomicUsize::new(0)),
-            producer_waker: CachePadded::new(AtomicWaker::new()),
-            consumer_waker: CachePadded::new(AtomicWaker::new()),
-            producer_waker_set: AtomicBool::new(false),
-            consumer_waker_set: AtomicBool::new(false),
+            producer_slot: CachePadded::new(WaiterSlot::new()),
+            consumer_slot: CachePadded::new(WaiterSlot::new()),
         });
 
         RingBuf { shared }
@@ -200,19 +186,17 @@ impl<T> Producer<T> {
         // Update cached write index
         self.cached_write = write.wrapping_add(1);
 
-        // Publish the write. SeqCst (not Release): pairs with the SeqCst load of
-        // `consumer_waker_set` below so the publish-store / flag-load sequence
-        // cannot be reordered against a sleeping consumer's symmetric
-        // flag-store / write-load. SeqCst store + SeqCst load forbids the SB
-        // outcome with no separate fence (on AArch64 this is stlr+ldar, no dmb).
+        // Publish the write. SeqCst (not Release): pairs with the SeqCst flag
+        // load inside `consumer_slot.signal()` below so the publish-store /
+        // flag-load sequence cannot be reordered against a sleeping consumer's
+        // symmetric arm-store / write-load. SeqCst store + SeqCst load forbids
+        // the SB outcome with no fence (on AArch64 this is stlr+ldar, no dmb).
         self.shared
             .write_index
             .store(self.cached_write, Ordering::SeqCst);
 
-        // Wake consumer if waiting (unlikely in hot path)
-        if unlikely(self.shared.consumer_waker_set.load(Ordering::SeqCst)) {
-            self.wake_consumer();
-        }
+        // Wake consumer if parked (cheap SeqCst-gated, unlikely in hot path).
+        self.shared.consumer_slot.signal();
 
         Ok(())
     }
@@ -300,9 +284,7 @@ impl<T> Producer<T> {
             .store(self.cached_write, Ordering::SeqCst);
 
         // Wake consumer once if needed (unlikely in hot path)
-        if unlikely(self.shared.consumer_waker_set.load(Ordering::SeqCst)) {
-            self.wake_consumer();
-        }
+        self.shared.consumer_slot.signal();
 
         to_push
     }
@@ -365,13 +347,6 @@ impl<T> Producer<T> {
     {
         block_on(self.push_slice(items))
     }
-
-    /// Wake the consumer if it's waiting
-    fn wake_consumer(&self) {
-        if self.shared.consumer_waker_set.swap(false, Ordering::AcqRel) {
-            self.shared.consumer_waker.wake();
-        }
-    }
 }
 
 impl std::io::Write for Producer<u8> {
@@ -416,7 +391,13 @@ impl<T> Consumer<T> {
     /// Try to pop an item from the buffer
     ///
     /// Returns `None` if the buffer is empty
+    #[inline]
     pub fn try_pop(&mut self) -> Option<T> {
+        self.try_pop_inner(true)
+    }
+
+    #[inline]
+    fn try_pop_inner(&mut self, signal: bool) -> Option<T> {
         let read = self.cached_read;
         let write = self.cached_write;
 
@@ -443,15 +424,15 @@ impl<T> Consumer<T> {
         // Update cached read index
         self.cached_read = read.wrapping_add(1);
 
-        // Publish the read. SeqCst: pairs with the SeqCst load of
-        // `producer_waker_set` below (SB-free with no fence; stlr+ldar on ARM).
+        // Publish the read. SeqCst: pairs with the SeqCst flag load inside
+        // `producer_slot.signal()` below (SB-free with no fence; stlr+ldar on ARM).
         self.shared
             .read_index
             .store(self.cached_read, Ordering::SeqCst);
 
-        // Wake producer if waiting (unlikely in hot path)
-        if unlikely(self.shared.producer_waker_set.load(Ordering::SeqCst)) {
-            self.wake_producer();
+        // Wake producer if parked (cheap SeqCst-gated, unlikely in hot path).
+        if signal {
+            self.shared.producer_slot.signal();
         }
 
         Some(value)
@@ -529,9 +510,7 @@ impl<T> Consumer<T> {
             .store(self.cached_read, Ordering::SeqCst);
 
         // Wake producer once if needed (unlikely in hot path)
-        if unlikely(self.shared.producer_waker_set.load(Ordering::SeqCst)) {
-            self.wake_producer();
-        }
+        self.shared.producer_slot.signal();
 
         to_pop
     }
@@ -597,13 +576,6 @@ impl<T> Consumer<T> {
     {
         block_on(self.pop_slice(items))
     }
-
-    /// Wake the producer if it's waiting
-    fn wake_producer(&self) {
-        if self.shared.producer_waker_set.swap(false, Ordering::AcqRel) {
-            self.shared.producer_waker.wake();
-        }
-    }
 }
 
 impl std::io::Read for Consumer<u8> {
@@ -656,25 +628,16 @@ impl<'a, T> std::future::Future for PushFuture<'a, T> {
                 // 4. we set waker and return Pending - deadlock
                 //
                 // Fix: set waker first, then re-check
-                this.producer.shared.producer_waker.register(cx.waker());
-                // SeqCst store: pairs with the SeqCst read-index load inside the
-                // re-check `try_push` below (and with the consumer's SeqCst
-                // publish/flag-load). The store/load sequence here and the
-                // consumer's symmetric one cannot both observe stale state
-                // (SB-free), so the wakeup can't be lost — no fence needed.
-                this.producer
-                    .shared
-                    .producer_waker_set
-                    .store(true, Ordering::SeqCst);
+                // Arm before re-checking: `arm` + the SeqCst re-check load in
+                // `try_push` form the SB-free handshake with the consumer's
+                // publish/signal, so the wake can't be lost (no fence needed).
+                this.producer.shared.producer_slot.arm(cx.waker());
 
                 // Re-check after registering waker to close the race window
                 match this.producer.try_push(v) {
                     Ok(()) => {
                         // Clear waker flag since we succeeded
-                        this.producer
-                            .shared
-                            .producer_waker_set
-                            .store(false, Ordering::Relaxed);
+                        this.producer.shared.producer_slot.disarm();
                         Poll::Ready(())
                     }
                     Err(v2) => {
@@ -704,22 +667,14 @@ impl<'a, T> std::future::Future for PopFuture<'a, T> {
         }
 
         // Register waker BEFORE re-checking to avoid race condition
-        this.consumer.shared.consumer_waker.register(cx.waker());
-        // SeqCst store: pairs with the SeqCst write-index load inside the
-        // re-check `try_pop` below (SB-free, no fence needed).
-        this.consumer
-            .shared
-            .consumer_waker_set
-            .store(true, Ordering::SeqCst);
+        // Arm before re-checking (SB-free handshake; see `WaiterSlot`).
+        this.consumer.shared.consumer_slot.arm(cx.waker());
 
         // Re-check after registering waker to close the race window
         match this.consumer.try_pop() {
             Some(value) => {
                 // Clear waker flag since we succeeded
-                this.consumer
-                    .shared
-                    .consumer_waker_set
-                    .store(false, Ordering::Relaxed);
+                this.consumer.shared.consumer_slot.disarm();
                 Poll::Ready(value)
             }
             None => Poll::Pending,
@@ -753,13 +708,8 @@ impl<'a, T: Copy> std::future::Future for PushSliceFuture<'a, T> {
         }
 
         // Register waker BEFORE re-checking to avoid race condition
-        this.producer.shared.producer_waker.register(cx.waker());
-        // SeqCst store: pairs with the SeqCst read-index load inside the
-        // re-check `try_push_slice` below (SB-free, no fence needed).
-        this.producer
-            .shared
-            .producer_waker_set
-            .store(true, Ordering::SeqCst);
+        // Arm before re-checking (SB-free handshake; see `WaiterSlot`).
+        this.producer.shared.producer_slot.arm(cx.waker());
 
         // Re-check after registering waker to close the race window
         let remaining = &this.items[this.pushed_so_far..];
@@ -769,10 +719,7 @@ impl<'a, T: Copy> std::future::Future for PushSliceFuture<'a, T> {
             this.pushed_so_far += pushed;
 
             if this.pushed_so_far == this.items.len() {
-                this.producer
-                    .shared
-                    .producer_waker_set
-                    .store(false, Ordering::Relaxed);
+                this.producer.shared.producer_slot.disarm();
                 return Poll::Ready(());
             }
         }
@@ -807,13 +754,8 @@ impl<'a, T: Copy> std::future::Future for PopSliceFuture<'a, T> {
         }
 
         // Register waker BEFORE re-checking to avoid race condition
-        this.consumer.shared.consumer_waker.register(cx.waker());
-        // SeqCst store: pairs with the SeqCst write-index load inside the
-        // re-check `try_pop_slice` below (SB-free, no fence needed).
-        this.consumer
-            .shared
-            .consumer_waker_set
-            .store(true, Ordering::SeqCst);
+        // Arm before re-checking (SB-free handshake; see `WaiterSlot`).
+        this.consumer.shared.consumer_slot.arm(cx.waker());
 
         // Re-check after registering waker to close the race window
         let remaining = &mut this.items[this.popped_so_far..];
@@ -823,10 +765,7 @@ impl<'a, T: Copy> std::future::Future for PopSliceFuture<'a, T> {
             this.popped_so_far += popped;
 
             if this.popped_so_far == this.items.len() {
-                this.consumer
-                    .shared
-                    .consumer_waker_set
-                    .store(false, Ordering::Relaxed);
+                this.consumer.shared.consumer_slot.disarm();
                 return Poll::Ready(());
             }
         }

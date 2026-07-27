@@ -75,13 +75,11 @@
 //! ```
 
 use std::{
-    alloc::{Layout, alloc_zeroed, dealloc, handle_alloc_error},
     cell::Cell,
     future::Future,
     marker::PhantomData,
-    ops::{Deref, DerefMut},
     pin::Pin,
-    ptr::{self, NonNull},
+    ptr,
     sync::{
         Arc,
         atomic::{AtomicPtr, AtomicUsize, Ordering},
@@ -89,285 +87,14 @@ use std::{
     task::{Context, Poll},
 };
 
-use futures::task::AtomicWaker;
-#[cfg(feature = "monoio-0_2")]
-use monoio::buf::{IoBuf, IoBufMut};
-
 use crate::{
     hints::{likely, unlikely},
-    site_d::padding::CachePadded,
+    site_d::{notify::WaiterSlot, padding::CachePadded},
 };
 
-// ================== Zeroable ==================
-
-/// Marker for types whose all-zero bit pattern is a valid, safe value.
-///
-/// # Safety
-///
-/// Implementors guarantee that a region of all-zero bytes is a valid and safe
-/// value of `Self`. This holds for integers, floats, `bool`, `char`, and
-/// fixed-size arrays of such types, but **not** for references, `NonNull`,
-/// `NonZero*`, or enums without a zero-valued variant.
-pub unsafe trait Zeroable {}
-
-macro_rules! impl_zeroable {
-    ($($t:ty),* $(,)?) => {
-        $(
-            // SAFETY: all-zero bytes are a valid value of each of these types
-            // (`0` for integers/floats, `false` for `bool`, `'\0'` for `char`).
-            unsafe impl Zeroable for $t {}
-        )*
-    };
-}
-
-impl_zeroable!(
-    u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize, f32, f64, bool, char
-);
-
-// SAFETY: an array is all-zero iff every element is all-zero, which is valid
-// when `T: Zeroable`.
-unsafe impl<T: Zeroable, const N: usize> Zeroable for [T; N] {}
-
-// ================== AlignedBuffer ==================
-
-/// An owning, heap-allocated, custom-aligned buffer of `T` used as the unit of
-/// transfer in a [`triple_buffer`].
-///
-/// The whole capacity is zero-initialized at construction (lazily, via the OS
-/// zero pages), so every element is always a valid `T` and the buffer derefs to
-/// a safe `&[T]` / `&mut [T]` of its logical [`len`](Self::len). `len` is purely
-/// a "how many elements are meaningful this round" cursor — separate from the
-/// always-valid physical capacity.
-pub struct AlignedBuffer<T: Zeroable + Copy> {
-    // `NonNull<T>` already makes this covariant in `T` and `!Send`/`!Sync`
-    // (re-granted under bounds by the manual impls below); since `Drop` never
-    // touches a `T` (`Copy` ⇒ no destructors), no `PhantomData<T>` is needed.
-    ptr: NonNull<T>,
-    /// Logical, meaningful length in elements (`<= cap`).
-    len: usize,
-    /// Capacity in elements.
-    cap: usize,
-    /// Alignment the allocation was made with (needed to reconstruct the
-    /// `Layout` for deallocation).
-    align: usize,
-}
-
-impl<T: Zeroable + Copy> AlignedBuffer<T> {
-    #[inline]
-    fn layout_for(cap: usize, align: usize) -> Layout {
-        Layout::array::<T>(cap)
-            .and_then(|l| l.align_to(align))
-            .expect("invalid buffer layout (capacity overflow)")
-    }
-
-    /// Allocate a new zeroed buffer with capacity `capacity` elements, aligned
-    /// to `align_of::<T>()`.
-    ///
-    /// # Panics
-    /// Panics if `capacity == 0`.
-    pub fn new(capacity: usize) -> Self {
-        Self::with_alignment(capacity, std::mem::align_of::<T>())
-    }
-
-    /// Allocate a new zeroed buffer with capacity `capacity` elements, aligned
-    /// to `align` bytes (e.g. `4096` for O_DIRECT).
-    ///
-    /// # Panics
-    /// Panics if `capacity == 0`, if `align` is not a power of two, or if
-    /// `align < align_of::<T>()`.
-    pub fn with_alignment(capacity: usize, align: usize) -> Self {
-        assert!(capacity > 0, "capacity must be greater than 0");
-        // A ZST would make `layout` zero-sized, and `alloc_zeroed` with a
-        // zero-size layout is undefined behavior. `[u8; 0]` is `Zeroable + Copy`,
-        // so this is reachable through entirely safe code without the guard.
-        assert!(
-            std::mem::size_of::<T>() != 0,
-            "zero-sized element types are not supported"
-        );
-        assert!(align.is_power_of_two(), "alignment must be a power of two");
-        assert!(
-            align >= std::mem::align_of::<T>(),
-            "alignment must be >= align_of::<T>()"
-        );
-
-        let layout = Self::layout_for(capacity, align);
-        // SAFETY: `capacity > 0` and `T` is not a ZST (both asserted above), so
-        // the layout has non-zero size.
-        let raw = unsafe { alloc_zeroed(layout) } as *mut T;
-        let ptr = NonNull::new(raw).unwrap_or_else(|| handle_alloc_error(layout));
-        debug_assert_eq!((ptr.as_ptr() as usize) % align, 0);
-
-        Self {
-            ptr,
-            len: 0,
-            cap: capacity,
-            align,
-        }
-    }
-
-    /// Capacity of the buffer in elements.
-    #[inline]
-    pub fn capacity(&self) -> usize {
-        self.cap
-    }
-
-    /// Alignment the buffer was allocated with.
-    #[inline]
-    pub fn alignment(&self) -> usize {
-        self.align
-    }
-
-    /// Logical (meaningful) length in elements.
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.len
-    }
-
-    /// Returns `true` if the logical length is 0.
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
-    /// Set the logical length.
-    ///
-    /// This is safe (unlike `Vec::set_len`): the entire capacity is always a
-    /// valid initialized region of `T`, so any `new_len <= capacity` exposes
-    /// only valid elements. Elements beyond what you actually wrote read back as
-    /// their zero value.
-    ///
-    /// # Panics
-    /// Panics if `new_len > capacity`.
-    #[inline]
-    pub fn set_len(&mut self, new_len: usize) {
-        assert!(
-            new_len <= self.cap,
-            "len {} exceeds capacity {}",
-            new_len,
-            self.cap
-        );
-        self.len = new_len;
-    }
-
-    /// The full capacity as a mutable slice, for filling the buffer before
-    /// setting its logical [`len`](Self::set_len).
-    #[inline]
-    pub fn capacity_mut(&mut self) -> &mut [T] {
-        // SAFETY: the whole `cap` region is zero-initialized and `T: Zeroable`,
-        // so every element is a valid `T`.
-        unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.cap) }
-    }
-
-    /// Raw const pointer to the buffer.
-    #[inline]
-    pub fn as_ptr(&self) -> *const T {
-        self.ptr.as_ptr()
-    }
-
-    /// Raw mutable pointer to the buffer.
-    #[inline]
-    pub fn as_mut_ptr(&mut self) -> *mut T {
-        self.ptr.as_ptr()
-    }
-
-    /// Convert into a raw data pointer and the logical length, forgetting
-    /// `self`. Reconstruct with [`from_raw_with_len`](Self::from_raw_with_len)
-    /// using the same capacity and alignment.
-    pub fn into_raw(self) -> (*mut T, usize) {
-        let p = self.ptr.as_ptr();
-        let len = self.len;
-        std::mem::forget(self);
-        (p, len)
-    }
-
-    /// Reconstruct a buffer from a raw pointer.
-    ///
-    /// # Safety
-    ///
-    /// `ptr` must have been produced by [`into_raw`](Self::into_raw) on an
-    /// `AlignedBuffer<T>` allocated with capacity `cap` and alignment `align`,
-    /// and not already reconstructed. `len` must be `<= cap`.
-    pub unsafe fn from_raw_with_len(ptr: *mut T, len: usize, cap: usize, align: usize) -> Self {
-        debug_assert!(!ptr.is_null());
-        debug_assert!(len <= cap);
-        debug_assert_eq!((ptr as usize) % align, 0);
-        Self {
-            ptr: unsafe { NonNull::new_unchecked(ptr) },
-            len,
-            cap,
-            align,
-        }
-    }
-}
-
-impl<T: Zeroable + Copy> Deref for AlignedBuffer<T> {
-    type Target = [T];
-    #[inline]
-    fn deref(&self) -> &[T] {
-        // SAFETY: `len <= cap`, and the whole capacity is valid initialized `T`.
-        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
-    }
-}
-
-impl<T: Zeroable + Copy> DerefMut for AlignedBuffer<T> {
-    #[inline]
-    fn deref_mut(&mut self) -> &mut [T] {
-        // SAFETY: see `deref`.
-        unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
-    }
-}
-
-impl<T: Zeroable + Copy> Drop for AlignedBuffer<T> {
-    fn drop(&mut self) {
-        // `T: Copy` => no element destructors to run; just free the allocation.
-        unsafe { dealloc(self.ptr.as_ptr() as *mut u8, Self::layout_for(self.cap, self.align)) }
-    }
-}
-
-impl<T: Zeroable + Copy + std::fmt::Debug> std::fmt::Debug for AlignedBuffer<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AlignedBuffer")
-            .field("len", &self.len)
-            .field("capacity", &self.cap)
-            .field("alignment", &self.align)
-            .finish()
-    }
-}
-
-// SAFETY: `AlignedBuffer<T>` owns a heap region of `T`, like `Box<[T]>`; it is
-// `Send`/`Sync` exactly when `T` is.
-unsafe impl<T: Zeroable + Copy + Send> Send for AlignedBuffer<T> {}
-unsafe impl<T: Zeroable + Copy + Sync> Sync for AlignedBuffer<T> {}
-
-#[cfg(feature = "monoio-0_2")]
-// SAFETY: `read_ptr` points to `bytes_init` valid, initialized bytes for the
-// lifetime of the buffer.
-unsafe impl IoBuf for AlignedBuffer<u8> {
-    fn read_ptr(&self) -> *const u8 {
-        self.ptr.as_ptr()
-    }
-
-    fn bytes_init(&self) -> usize {
-        self.len
-    }
-}
-
-#[cfg(feature = "monoio-0_2")]
-// SAFETY: `write_ptr` points to `bytes_total` writable bytes; `set_init` only
-// records how many were initialized.
-unsafe impl IoBufMut for AlignedBuffer<u8> {
-    fn write_ptr(&mut self) -> *mut u8 {
-        self.ptr.as_ptr()
-    }
-
-    fn bytes_total(&mut self) -> usize {
-        self.cap
-    }
-
-    unsafe fn set_init(&mut self, pos: usize) {
-        self.len = pos;
-    }
-}
+// `AlignedBuffer`/`Zeroable` now live in the shared `buffer` module; re-export
+// them here so the long-standing `triplebuffer::AlignedBuffer` path keeps working.
+pub use crate::site_d::buffer::{AlignedBuffer, Zeroable};
 
 // ================== Internal shared state (hidden) ==================
 
@@ -378,11 +105,6 @@ struct SharedState {
     generation: AtomicUsize,
     // Last generation observed and committed by the reader.
     last_read_gen: AtomicUsize,
-}
-
-struct Waiters {
-    reader: AtomicWaker, // one reader task
-    writer: AtomicWaker, // one writer task
 }
 
 /// Internal lock-free triple buffer with async backpressure (SPSC).
@@ -409,8 +131,14 @@ struct TripleBuffer<T: Zeroable + Copy> {
     // === Shared cache line ===
     shared_state: CachePadded<SharedState>,
 
-    // === Wakers (not on hot path, but kept padded anyway) ===
-    waiters: CachePadded<Waiters>,
+    // === Wakeup slots, one per direction, each on its own cache line ===
+    // The writer reads `reader_slot.armed` on every publish and the reader
+    // reads `writer_slot.armed` on every take, so the two slots must not share
+    // a line. See [`WaiterSlot`] for the flag-gated `SeqCst` wakeup contract;
+    // this primitive upholds it via the `SeqCst` generation/last-read publish
+    // and the `SeqCst` re-check loads in `has_unread`/`middle_free`.
+    reader_slot: CachePadded<WaiterSlot>,
+    writer_slot: CachePadded<WaiterSlot>,
 
     // Tie `Send`/`Sync` of the structure to `T` (the `AtomicPtr<T>`s would
     // otherwise make it unconditionally `Send`/`Sync`, which is unsound for
@@ -446,10 +174,8 @@ impl<T: Zeroable + Copy> TripleBuffer<T> {
                 generation: AtomicUsize::new(0),
                 last_read_gen: AtomicUsize::new(0),
             }),
-            waiters: CachePadded::new(Waiters {
-                reader: AtomicWaker::new(),
-                writer: AtomicWaker::new(),
-            }),
+            reader_slot: CachePadded::new(WaiterSlot::new()),
+            writer_slot: CachePadded::new(WaiterSlot::new()),
             _marker: PhantomData,
         };
 
@@ -458,57 +184,57 @@ impl<T: Zeroable + Copy> TripleBuffer<T> {
 
     // ------------- Wake/registration -------------
 
+    /// Wake the reader if parked (cheap `SeqCst`-gated; called after the
+    /// `SeqCst` generation publish in `writer_publish_now`).
     #[inline(always)]
     fn wake_reader(&self) {
-        self.waiters.as_ref().reader.wake();
+        self.reader_slot.signal();
     }
 
+    /// Wake the writer if parked (cheap `SeqCst`-gated; called after the
+    /// `SeqCst` last-read publish in `reader_take_now`).
     #[inline(always)]
     fn wake_writer(&self) {
-        self.waiters.as_ref().writer.wake();
-    }
-
-    #[inline(always)]
-    fn register_reader_waker(&self, w: &std::task::Waker) {
-        self.waiters.as_ref().reader.register(w);
-    }
-
-    #[inline(always)]
-    fn register_writer_waker(&self, w: &std::task::Waker) {
-        self.waiters.as_ref().writer.register(w);
+        self.writer_slot.signal();
     }
 
     // ------------- State checks -------------
 
     /// Returns true if there is a published-but-unread buffer.
+    ///
+    /// The `generation` load is `SeqCst`: as the reader's re-check after arming
+    /// `reader_slot`, it pairs with the writer's `SeqCst` generation publish and
+    /// `reader_slot.signal()` flag-load to forbid a lost wakeup (the
+    /// store-buffer handshake; see [`WaiterSlot`]). `last_read_gen` is the
+    /// reader's own counter.
+    ///
+    /// [`WaiterSlot`]: super::notify::WaiterSlot
     #[inline(always)]
     fn has_unread(&self) -> bool {
-        let generation = self
-            .shared_state
-            .as_ref()
-            .generation
-            .load(Ordering::Acquire);
+        let generation = self.shared_state.as_ref().generation.load(Ordering::SeqCst);
         let last_read = self
             .shared_state
             .as_ref()
             .last_read_gen
-            .load(Ordering::Acquire);
+            .load(Ordering::SeqCst);
         generation != last_read
     }
 
     /// Returns true if writer can publish (no unread data in middle).
+    ///
+    /// The `last_read_gen` load is `SeqCst`: as the writer's re-check after
+    /// arming `writer_slot`, it pairs with the reader's `SeqCst` last-read
+    /// publish and `writer_slot.signal()` flag-load (see [`WaiterSlot`]).
+    ///
+    /// [`WaiterSlot`]: super::notify::WaiterSlot
     #[inline(always)]
     fn middle_free(&self) -> bool {
-        let generation = self
-            .shared_state
-            .as_ref()
-            .generation
-            .load(Ordering::Acquire);
+        let generation = self.shared_state.as_ref().generation.load(Ordering::SeqCst);
         let last_read = self
             .shared_state
             .as_ref()
             .last_read_gen
-            .load(Ordering::Acquire);
+            .load(Ordering::SeqCst);
         generation == last_read
     }
 
@@ -543,11 +269,14 @@ impl<T: Zeroable + Copy> TripleBuffer<T> {
             .middle_idx
             .store(writer_idx, Ordering::Relaxed);
 
-        // Increment generation to publish; pairs with reader's Acquire observations
-        self.shared_state
-            .as_ref()
-            .generation
-            .fetch_add(1, Ordering::Release);
+        // Publish: bump generation. The writer is the sole writer, so we
+        // load-then-store (the Relaxed load hits our own cache line) instead of
+        // a `fetch_add` RMW. The SeqCst store pairs with the reader's SeqCst
+        // re-check in `has_unread` and the `reader_slot.signal()` flag-load
+        // below — the store-buffer-free handshake (see `WaiterSlot`).
+        let ss = self.shared_state.as_ref();
+        let next_gen = ss.generation.load(Ordering::Relaxed).wrapping_add(1);
+        ss.generation.store(next_gen, Ordering::SeqCst);
 
         // Take buffer from what was middle (now writer's)
         let ptr = self.buffers[middle_idx].swap(ptr::null_mut(), Ordering::Acquire);
@@ -610,17 +339,49 @@ impl<T: Zeroable + Copy> TripleBuffer<T> {
         let buf =
             unsafe { AlignedBuffer::from_raw_with_len(ptr, published_len, self.cap, self.align) };
 
-        // Commit: mark this generation as read only after we've removed the buffer from
-        // the middle
+        // Commit: mark this generation read, only after removing the buffer from
+        // the middle. SeqCst (not Release) so it pairs with the writer's SeqCst
+        // re-check in `middle_free` and the `writer_slot.signal()` flag-load
+        // below — the store-buffer-free handshake (see `WaiterSlot`).
         self.shared_state
             .as_ref()
             .last_read_gen
-            .store(generation, Ordering::Release);
+            .store(generation, Ordering::SeqCst);
 
         // Notify writer that middle is now free
         self.wake_writer();
 
         buf
+    }
+
+    /// Sync, non-blocking publish: rotate if the middle is free, else hand the
+    /// buffer back. This is the single code path behind both the async
+    /// [`WriterPublish`] future and the public `try_publish`.
+    #[inline(always)]
+    fn try_publish_now(
+        &self,
+        completed: AlignedBuffer<T>,
+    ) -> Result<AlignedBuffer<T>, AlignedBuffer<T>> {
+        if likely(self.middle_free()) {
+            Ok(self.writer_publish_now(completed))
+        } else {
+            Err(completed)
+        }
+    }
+
+    /// Sync, non-blocking take: return the published buffer if one is unread,
+    /// else hand `previous` back. The single path behind both the async
+    /// [`ReaderNext`] future and the public `try_next`.
+    #[inline(always)]
+    fn try_take_now(
+        &self,
+        previous: Option<AlignedBuffer<T>>,
+    ) -> Result<AlignedBuffer<T>, Option<AlignedBuffer<T>>> {
+        if likely(self.has_unread()) {
+            Ok(self.reader_take_now(previous))
+        } else {
+            Err(previous)
+        }
     }
 
     // ------------- Synchronous helpers -------------
@@ -734,6 +495,26 @@ impl<T: Zeroable + Copy> TripleBufWriter<T> {
         }
     }
 
+    /// Non-blocking [`publish`](Self::publish). Returns `Ok(next_buffer)` if the
+    /// reader has consumed the previously published buffer; otherwise `Err(buf)`
+    /// hands `buf` back unchanged (the middle slot still holds unread data — try
+    /// again later).
+    ///
+    /// `buf` must have come from this triple buffer (same capacity/alignment).
+    ///
+    /// # Panics
+    /// Panics if `buf`'s geometry does not match this triple buffer.
+    pub fn try_publish(
+        &mut self,
+        buf: AlignedBuffer<T>,
+    ) -> Result<AlignedBuffer<T>, AlignedBuffer<T>> {
+        assert!(
+            buf.capacity() == self.inner.cap && buf.alignment() == self.inner.align,
+            "buffer geometry does not match this triple buffer"
+        );
+        self.inner.try_publish_now(buf)
+    }
+
     /// Snapshot statistics (debugging).
     pub fn stats(&self) -> BufferStats {
         self.inner.stats()
@@ -766,6 +547,25 @@ impl<T: Zeroable + Copy> TripleBufReader<T> {
         }
     }
 
+    /// Non-blocking [`next`](Self::next). Returns `Ok(published_buffer)` if a new
+    /// buffer is available; otherwise `Err(previous)` hands `previous` back
+    /// unchanged (nothing new to read yet — try again later).
+    ///
+    /// # Panics
+    /// Panics if `previous`'s geometry does not match this triple buffer.
+    pub fn try_next(
+        &mut self,
+        previous: Option<AlignedBuffer<T>>,
+    ) -> Result<AlignedBuffer<T>, Option<AlignedBuffer<T>>> {
+        if let Some(ref b) = previous {
+            assert!(
+                b.capacity() == self.inner.cap && b.alignment() == self.inner.align,
+                "buffer geometry does not match this triple buffer"
+            );
+        }
+        self.inner.try_take_now(previous)
+    }
+
     /// Snapshot statistics (debugging).
     pub fn stats(&self) -> BufferStats {
         self.inner.stats()
@@ -787,23 +587,26 @@ impl<'a, T: Zeroable + Copy> Future for WriterPublish<'a, T> {
         // SAFETY: this future holds no address-sensitive state; the only field
         // we move is the owned (movable) `AlignedBuffer` out of the `Option`.
         let this = unsafe { self.get_unchecked_mut() };
+        let buf = this.buf.take().expect("polled after completion");
 
-        // Fast path: can publish now?
-        if likely(this.tb.middle_free()) {
-            let buf = this.buf.take().expect("polled after completion");
-            let next = this.tb.writer_publish_now(buf);
-            return Poll::Ready(next);
-        }
+        // Fast path: same sync op as `try_publish`.
+        let buf = match this.tb.try_publish_now(buf) {
+            Ok(next) => return Poll::Ready(next),
+            Err(buf) => buf,
+        };
 
-        // Register waker, then re-check to avoid missed wake
-        this.tb.register_writer_waker(cx.waker());
-
-        if this.tb.middle_free() {
-            let buf = this.buf.take().expect("polled after completion");
-            let next = this.tb.writer_publish_now(buf);
-            Poll::Ready(next)
-        } else {
-            Poll::Pending
+        // Arm before re-checking: `arm` + the SeqCst re-check in `middle_free`
+        // form the SB-free handshake with the reader's publish/signal.
+        this.tb.writer_slot.arm(cx.waker());
+        match this.tb.try_publish_now(buf) {
+            Ok(next) => {
+                this.tb.writer_slot.disarm();
+                Poll::Ready(next)
+            }
+            Err(buf) => {
+                this.buf = Some(buf);
+                Poll::Pending
+            }
         }
     }
 }
@@ -821,20 +624,24 @@ impl<'a, T: Zeroable + Copy> Future for ReaderNext<'a, T> {
         // SAFETY: see `WriterPublish::poll`.
         let this = unsafe { self.get_unchecked_mut() };
 
-        // Fast path: unread data available?
-        if likely(this.tb.has_unread()) {
-            let buf = this.tb.reader_take_now(this.prev.take());
-            return Poll::Ready(buf);
-        }
+        // Fast path: same sync op as `try_next`.
+        let prev = match this.tb.try_take_now(this.prev.take()) {
+            Ok(buf) => return Poll::Ready(buf),
+            Err(prev) => prev,
+        };
 
-        // Register waker, then re-check to avoid missed wake
-        this.tb.register_reader_waker(cx.waker());
-
-        if this.tb.has_unread() {
-            let buf = this.tb.reader_take_now(this.prev.take());
-            Poll::Ready(buf)
-        } else {
-            Poll::Pending
+        // Arm before re-checking: `arm` + the SeqCst re-check in `has_unread`
+        // form the SB-free handshake with the writer's publish/signal.
+        this.tb.reader_slot.arm(cx.waker());
+        match this.tb.try_take_now(prev) {
+            Ok(buf) => {
+                this.tb.reader_slot.disarm();
+                Poll::Ready(buf)
+            }
+            Err(prev) => {
+                this.prev = prev;
+                Poll::Pending
+            }
         }
     }
 }
@@ -842,9 +649,13 @@ impl<'a, T: Zeroable + Copy> Future for ReaderNext<'a, T> {
 /// Statistics about the triple buffer state (for debugging/visibility).
 #[derive(Debug, Clone, Copy)]
 pub struct BufferStats {
+    /// Slot the writer currently owns.
     pub writer_idx: usize,
+    /// Slot the reader currently owns.
     pub reader_idx: usize,
+    /// Slot holding the most recently published buffer.
     pub middle_idx: usize,
+    /// Publish counter; increments once per `publish`.
     pub generation: usize,
 }
 
@@ -868,11 +679,7 @@ mod tests {
     const CAP: usize = 8192;
     const ALIGN: usize = 4096;
 
-    fn u8_triple() -> (
-        TripleBufWriter<u8>,
-        TripleBufReader<u8>,
-        AlignedBuffer<u8>,
-    ) {
+    fn u8_triple() -> (TripleBufWriter<u8>, TripleBufReader<u8>, AlignedBuffer<u8>) {
         triple_buffer_aligned::<u8>(CAP, ALIGN)
     }
 
@@ -1038,6 +845,40 @@ mod tests {
         assert_eq!(read_seq(&rbuf2), 9);
 
         assert_eq!(next2.capacity(), CAP);
+    }
+
+    #[test]
+    fn sync_try_publish_and_try_next() {
+        let (mut writer, mut reader, mut wbuf) = u8_triple();
+
+        // Nothing published yet.
+        assert!(reader.try_next(None).is_err());
+
+        write_seq(&mut wbuf, 11);
+        let mut next = writer.try_publish(wbuf).expect("middle free");
+
+        // Middle now holds unread data: a second publish must fail (backpressure)
+        // and hand the buffer back unchanged.
+        write_seq(&mut next, 22);
+        let next = match writer.try_publish(next) {
+            Ok(_) => panic!("expected backpressure while middle holds unread data"),
+            Err(buf) => buf,
+        };
+
+        // Reader takes the first published buffer.
+        let rbuf = reader.try_next(None).expect("unread available");
+        assert_eq!(read_seq(&rbuf), 11);
+
+        // Middle free again: the second publish now succeeds.
+        let _next2 = writer.try_publish(next).expect("middle free after read");
+        let rbuf2 = reader
+            .try_next(Some(rbuf))
+            .expect("second unread available");
+        assert_eq!(read_seq(&rbuf2), 22);
+
+        // Drained again.
+        drop(rbuf2);
+        assert!(reader.try_next(None).is_err());
     }
 
     #[test]

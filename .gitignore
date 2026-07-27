@@ -1,2 +1,18 @@
 /target
 Cargo.lock
+
+# chartgen build output (charts themselves are committed)
+tools/chartgen/target/
+
+# macOS
+.DS_Store
+
+# Not part of the release. Both stay on disk locally; neither is pushed.
+#   attic/                   - the fat mpsc + its bench, removed pre-0.6 (kept for a
+#                              possible 0.7). NOTE: it was never committed, so this
+#                              ignore makes the working copy the only copy.
+#   rust-channel-benchmarks/ - kanal's third-party suite, vendored for the
+#                              tokio-regime comparison; unpinned git dep + shell
+#                              scripts that clone upstream.
+attic/
+rust-channel-benchmarks/

@@ -1,100 +1,55 @@
-# LocalCell Benchmarks
+# Cynosure Benchmarks
 
-This directory contains benchmarks for the LocalCell crate components using [Criterion.rs](https://github.com/bheisler/criterion.rs). These benchmarks help measure the performance of various operations and compare them with alternative implementations.
+[Criterion.rs](https://github.com/bheisler/criterion.rs) benchmarks for the cynosure primitives,
+with comparisons against the relevant standard-library and ecosystem alternatives. See
+[`../BENCHMARKS.md`](../BENCHMARKS.md) for results and analysis.
 
-## Benchmark Suites
+## Benches
 
-The benchmarks are organized into three main suites:
+| bench | covers | compares against |
+|---|---|---|
+| `spsc_compare` | `RingBuf` SPSC — latency, throughput (1/2-thread sync, blocking, 1-thread async, cross-thread async + round-trip latency) | rtrb, ringbuf, thingbuf, kanal, flume, crossbeam, std::mpsc, tokio::mpsc |
+| `ringbuf_spsc` | `RingBuf` sync + async + bulk-slice + buffer sizes | std::mpsc, crossbeam |
+| `triplebuffer` | triple buffer throughput + rotation latency | crossbeam recycling channels |
+| `bipbuffer` | bip buffer reserve/commit/read/release | bbqueue |
+| `mpsc_light` | fan-in throughput (1–16 producers) + ping-pong wakeup latency | kanal |
+| `oneshot` | create + send + recv | tokio, futures-channel, oneshot, async-oneshot, catty |
+| `semaphore` | `LocalSemaphore` try_acquire | tokio, async-lock |
+| `pool` | `LocalBufferPool` acquire/return | object-pool, lockfree-object-pool, Mutex<Vec> |
+| `mutex` | `LocalMutex` | parking_lot, std, tokio, RefCell |
+| `rwlock` | `LocalRwLock` | parking_lot, std, tokio, RefCell |
+| `queue` | `Queue<T, N>` (incl. `retain`) | VecDeque |
 
-1. **LocalCell Benchmarks** - Tests the core `LocalCell<T>` type
-   - Basic operations (creation, access, mutation)
-   - Comparison with `Rc<RefCell<T>>`
-   - Realistic usage patterns
+Three further benches are plain binaries rather than criterion suites: they measure the data the
+README charts are drawn from and write it to `docs/bench-data/`.
 
-2. **Queue Benchmarks** - Tests the stack-optimized queue implementation
-   - Operations with different capacities (inline vs heap storage)
-   - Comparison with `VecDeque`
-   - FIFO patterns and mixed operations
+| bench | produces |
+|---|---|
+| `latency_dist` | `latency-primitives.csv` — latency **distributions** for every primitive |
+| `primitives_throughput` | `throughput-measured.csv` — sustained throughput, measured separately from latency |
+| `control_plane` | `latency.csv` — `mpsc_light` under paced/real-world control-plane load |
 
-3. **LocalMutex Benchmarks** - Tests the async mutex implementation
-   - Lock/unlock operations and try_lock variants
-   - Comparison with Tokio's async Mutex
-   - Holding locks across await points
-   - Sequential operations and cloning overhead
-   - Memory overhead and realistic usage patterns
-
-## Running the Benchmarks
-
-You can run all benchmarks or target specific ones:
+## Running
 
 ```bash
-# Run all benchmarks (may take some time)
-cargo bench
+cargo bench                       # everything
+cargo bench --bench spsc_compare  # one suite
+cargo bench --bench mutex -- "Latency"   # filter by group/name
 
-# Run only LocalCell benchmarks
-cargo bench --bench localcell
-
-# Run only Queue benchmarks
-cargo bench --bench queue
-
-# Run only LocalMutex benchmarks
-cargo bench --bench mutex
-
-# Run a specific benchmark group
-cargo bench --bench localcell -- "LocalCell Creation"
-
-# Filter benchmarks by name
-cargo bench --bench queue -- "push_back"
+cargo run --manifest-path ../tools/chartgen/Cargo.toml   # redraw docs/charts/* from the data
 ```
 
-## Interpreting Results
+HTML reports are written to `target/criterion/report/index.html`.
 
-Criterion generates HTML reports in `target/criterion/report/index.html`. Open this file in a browser to see detailed results, including:
+## Notes
 
-- Mean execution time
-- Statistical significance
-- Comparison with previous runs
-- Performance regression detection
-- Violin plots showing performance distribution
-
-The most important metrics to look at:
-
-- **Mean time**: Average execution time for the operation
-- **Throughput**: Operations per second (higher is better)
-- **Slope**: Change in performance over time (for trend analysis)
-
-## Benchmarking Tips
-
-For valid and reliable benchmarks:
-
-1. **Run in release mode**: Always use `cargo bench` which automatically uses release mode
-2. **Minimize system noise**: Close other applications and avoid running resource-intensive processes
-3. **Run multiple times**: Criterion runs benchmarks multiple times to get statistically significant results
-4. **Watch for outliers**: Sudden spikes may indicate external interference
-5. **Compare relative performance**: Focus on relative differences rather than absolute numbers
-6. **Use black_box()**: Prevent the compiler from optimizing away code that would be used in real scenarios
-
-## Comparing with Alternatives
-
-These benchmarks include comparisons with standard library and ecosystem alternatives:
-
-- `LocalCell<T>` vs `Rc<RefCell<T>>`
-- `Queue<T, N>` vs `VecDeque<T>`
-- `LocalMutex<T>` vs `tokio::sync::Mutex<T>` (wrapped in `Arc`)
-
-The comparison focuses on:
-- Memory overhead and allocation patterns
-- Runtime performance for basic operations
-- Lock contention and async behavior
-- Scalability with data size
-- Common usage patterns (shared counters, read-modify-write, etc.)
-
-## Custom Benchmark Configurations
-
-You can customize the benchmark parameters by modifying the source files. Some examples:
-
-- Change data sizes in vector tests
-- Adjust the number of waiters in mutex tests
-- Modify the stack capacity of Queue
-
-After changing parameters, run the benchmarks again to see the impact on performance.
+- Results are relative; focus on ratios, not absolute numbers, and re-run on your own hardware.
+- All benches use `black_box` to prevent the optimizer from eliding the measured work.
+- The bench profile builds with **LTO** (`[profile.bench]`) so cynosure's lean inlined ops inline
+  across the crate boundary — i.e. what a `release` + LTO user gets. Without it, sub-5 ns ops read
+  artificially slow (the wins live in the inlining).
+- Numbers differ across architectures (notably x86 vs AArch64 for the atomic-ordering hot paths).
+- Sub-nanosecond operations cannot be timed individually (`Instant::now()` costs more than they do),
+  so `latency_dist` samples them in batches of 512 and reports **to p99 only** — past that the
+  batch means measure OS preemption rather than the primitive. See BENCHMARKS.md for the control
+  experiment that establishes this.

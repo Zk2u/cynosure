@@ -1,3 +1,8 @@
+//! `LocalMutex` — a single-threaded async mutex.
+//!
+//! Non-atomic (`Cell`-based), so it sits near the `RefCell` floor while staying
+//! usable across `.await` points, which a plain `RefCell` borrow is not.
+
 use std::{
     cell::{Cell, UnsafeCell},
     future::Future,
@@ -611,7 +616,10 @@ mod tests {
             .filter(|f| f.load(AO::SeqCst))
             .count();
         assert_eq!(woken, 1, "exactly one waiter should be woken, not all");
-        assert!(f1.load(AO::SeqCst), "the FIFO-front waiter is the one woken");
+        assert!(
+            f1.load(AO::SeqCst),
+            "the FIFO-front waiter is the one woken"
+        );
     }
 
     /// A cancelled waiter doesn't break wake delivery: the live waiter is still

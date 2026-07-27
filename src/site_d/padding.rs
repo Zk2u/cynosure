@@ -1,3 +1,8 @@
+//! `CachePadded<T>` — aligns a value to its own cache line.
+//!
+//! Used to keep independently-written atomics off each other's lines; false
+//! sharing between two hot indices costs far more than the padding.
+
 use std::ops::{Deref, DerefMut};
 
 /// Padding to prevent false sharing between atomic variables
@@ -8,10 +13,12 @@ pub struct CachePadded<T> {
 }
 
 impl<T> CachePadded<T> {
+    /// Wrap `value` on its own cache line.
     pub fn new(value: T) -> Self {
         Self { value }
     }
 
+    /// Unwrap, discarding the padding.
     pub fn into_inner(self) -> T {
         self.value
     }

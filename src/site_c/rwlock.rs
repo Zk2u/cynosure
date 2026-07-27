@@ -1,3 +1,8 @@
+//! `LocalRwLock` — a single-threaded async reader-writer lock, write-preferring.
+//!
+//! Non-atomic like [`LocalMutex`](super::mutex), and likewise held across
+//! `.await`.
+
 use std::{
     cell::{Cell, UnsafeCell},
     future::Future,
