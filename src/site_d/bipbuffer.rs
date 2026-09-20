@@ -96,7 +96,10 @@ impl Inner {
     /// Try to reserve `n` contiguous bytes; returns the region `[start,
     /// start+n)`.
     fn try_reserve(&self, n: usize) -> Option<(usize, usize)> {
-        if unlikely(self.wip.load(Ordering::Relaxed)) {
+        // Acquire: pairs with the Release clear in `WriteGrant::commit`/`drop`,
+        // so a grant released on another thread publishes its buffer accesses
+        // before a new reservation here can overlap them.
+        if unlikely(self.wip.load(Ordering::Acquire)) {
             return None; // a write grant is already outstanding
         }
         // A contiguous region can never exceed the capacity. Reject oversized
@@ -128,13 +131,14 @@ impl Inner {
         };
 
         self.reserve.store(start + n, Ordering::Relaxed);
-        self.wip.store(true, Ordering::Relaxed);
+        self.wip.store(true, Ordering::Release);
         Some((start, n))
     }
 
     /// Try to get the contiguous readable region; returns `[start, start+len)`.
     fn try_read(&self) -> Option<(usize, usize)> {
-        if unlikely(self.rip.load(Ordering::Relaxed)) {
+        // Acquire: pairs with the Release clear in `ReadGrant::release`/`drop`.
+        if unlikely(self.rip.load(Ordering::Acquire)) {
             return None;
         }
         let write = self.write.load(Ordering::SeqCst);
@@ -154,7 +158,7 @@ impl Inner {
         if len == 0 {
             return None;
         }
-        self.rip.store(true, Ordering::Relaxed);
+        self.rip.store(true, Ordering::Release);
         Some((read, len))
     }
 }
@@ -273,7 +277,9 @@ impl WriteGrant {
         // Publish (SeqCst): pairs with the consumer's SeqCst `write` re-check and
         // the `data.signal()` flag-load — the SB-free wakeup handshake.
         inner.write.store(self.start + used, Ordering::SeqCst);
-        inner.wip.store(false, Ordering::Relaxed);
+        // Release: a producer on another thread that later observes this clear
+        // (Acquire load in `try_reserve`) must see the published state above.
+        inner.wip.store(false, Ordering::Release);
         inner.data.signal();
         // `self` drops here; `handed_back` makes that drop a no-op.
     }
@@ -287,7 +293,7 @@ impl Drop for WriteGrant {
             return;
         }
         // Abandon the reservation if it was never committed (nothing published).
-        if self.inner.wip.swap(false, Ordering::Relaxed) {
+        if self.inner.wip.swap(false, Ordering::Release) {
             let w = self.inner.write.load(Ordering::Relaxed);
             self.inner.reserve.store(w, Ordering::Relaxed);
         }
@@ -333,7 +339,8 @@ impl ReadGrant {
         // Publish (SeqCst): pairs with the producer's SeqCst `read` re-check and
         // the `space.signal()` flag-load.
         inner.read.store(read + used, Ordering::SeqCst);
-        inner.rip.store(false, Ordering::Relaxed);
+        // Release: pairs with the Acquire load in `try_read`.
+        inner.rip.store(false, Ordering::Release);
         inner.space.signal();
     }
 }
@@ -345,8 +352,8 @@ impl Drop for ReadGrant {
             return;
         }
         // Not released: leave the data readable (read unchanged), just clear the
-        // in-progress flag.
-        self.inner.rip.store(false, Ordering::Relaxed);
+        // in-progress flag (Release: pairs with the Acquire load in `try_read`).
+        self.inner.rip.store(false, Ordering::Release);
     }
 }
 
@@ -596,5 +603,38 @@ mod tests {
         assert_eq!(rg.as_slice(), &[3], "the un-released byte remains");
         rg.release(1);
         assert!(c.try_read().is_none());
+    }
+
+    /// An abandoned grant dropped on one thread must publish its buffer
+    /// accesses before a reservation on another thread can overlap the same
+    /// bytes. The in-progress flag carries the ordering (Release/Acquire);
+    /// without it Miri reports the overlap as a data race.
+    #[test]
+    fn abandoned_grant_orders_across_threads() {
+        use std::{hint::spin_loop, thread};
+
+        let (mut p, _c) = bip_buffer(8);
+        for _ in 0..8 {
+            let mut grant = p.try_reserve(8).expect("reserve");
+            let worker = thread::spawn(move || {
+                grant.as_mut_slice().fill(1);
+                drop(grant);
+            });
+            // Race a fresh reservation here against the worker's drop. Both
+            // grants are abandoned (never committed), so nothing is published
+            // and the region can be reserved again each round.
+            let mut next = None;
+            for _ in 0..10_000 {
+                if let Some(g) = p.try_reserve(8) {
+                    next = Some(g);
+                    break;
+                }
+                spin_loop();
+            }
+            if let Some(mut g) = next {
+                g.as_mut_slice().fill(2);
+            }
+            worker.join().unwrap();
+        }
     }
 }
