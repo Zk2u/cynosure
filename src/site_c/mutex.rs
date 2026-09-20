@@ -201,12 +201,13 @@ impl<T: std::fmt::Debug> std::fmt::Debug for LocalMutex<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut d = f.debug_struct("LocalMutex");
         d.field("locked", &self.locked.get());
-        if !self.locked.get() {
-            // SAFETY: Not locked, safe to read
-            d.field("value", unsafe { &*self.value.get() });
-        } else {
-            d.field("value", &"<locked>");
-        }
+        // Format the value only while holding the lock, so a `Debug` impl that
+        // re-enters this mutex cannot take it for mutation while this shared
+        // borrow is live.
+        match self.try_lock() {
+            Some(guard) => d.field("value", &*guard),
+            None => d.field("value", &"<locked>"),
+        };
         d.finish()
     }
 }
@@ -703,5 +704,33 @@ mod tests {
             flag.load(AO::SeqCst),
             "woken-then-barged waiter must be re-queued and re-woken"
         );
+    }
+
+    /// `Debug` formats the guarded value under the lock, so a contained type
+    /// whose `Debug` re-enters the same mutex cannot alias the shared borrow.
+    #[test]
+    fn debug_formats_under_lock() {
+        use std::fmt;
+
+        struct Value(u8);
+        thread_local! {
+            static M: LocalMutex<Value> = LocalMutex::new(Value(1));
+        }
+        impl fmt::Debug for Value {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                // Re-enter the same mutex during formatting.
+                M.with(|m| {
+                    if let Some(mut g) = m.try_lock() {
+                        g.0 = 2;
+                    }
+                });
+                write!(f, "{}", self.0)
+            }
+        }
+
+        M.with(|m| {
+            let out = format!("{m:?}");
+            assert!(out.contains('1'), "unexpected: {out}");
+        });
     }
 }

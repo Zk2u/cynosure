@@ -309,12 +309,13 @@ impl<T: std::fmt::Debug> std::fmt::Debug for LocalRwLock<T> {
         let mut d = f.debug_struct("LocalRwLock");
         d.field("readers", &self.readers.get());
         d.field("writer", &self.writer.get());
-        if !self.is_locked() {
-            // SAFETY: Not locked, safe to read
-            d.field("value", unsafe { &*self.value.get() });
-        } else {
-            d.field("value", &"<locked>");
-        }
+        // Format the value only while holding a read lock, so a `Debug` impl
+        // that re-enters this lock cannot take it for writing while this shared
+        // borrow is live.
+        match self.try_read() {
+            Some(guard) => d.field("value", &*guard),
+            None => d.field("value", &"<locked>"),
+        };
         d.finish()
     }
 }
@@ -960,5 +961,34 @@ mod tests {
             flag.load(AO::SeqCst),
             "woken-then-barged writer must be re-queued and re-woken"
         );
+    }
+
+    /// `Debug` formats the guarded value under a read lock, so a contained type
+    /// whose `Debug` re-enters the same lock cannot take it for writing while
+    /// the shared borrow is live.
+    #[test]
+    fn debug_formats_under_lock() {
+        use std::fmt;
+
+        struct Value(u8);
+        thread_local! {
+            static L: LocalRwLock<Value> = LocalRwLock::new(Value(1));
+        }
+        impl fmt::Debug for Value {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                // Re-enter the same lock during formatting.
+                L.with(|l| {
+                    if let Some(mut g) = l.try_write() {
+                        g.0 = 2;
+                    }
+                });
+                write!(f, "{}", self.0)
+            }
+        }
+
+        L.with(|l| {
+            let out = format!("{l:?}");
+            assert!(out.contains('1'), "unexpected: {out}");
+        });
     }
 }
