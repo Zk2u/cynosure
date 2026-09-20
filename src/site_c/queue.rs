@@ -414,7 +414,11 @@ impl<T, const N: usize> Queue<T, N> {
         }
     }
 
-    /// Removes all elements from the queue
+    /// Removes all elements from the queue.
+    ///
+    /// The queue state stays consistent if an element's destructor panics: the
+    /// element being dropped and everything already drained are no longer
+    /// counted as live, and the remainder is still owned and initialized.
     pub fn clear(&mut self) {
         match &mut self.0 {
             QueueInternal::Inline {
@@ -423,17 +427,24 @@ impl<T, const N: usize> Queue<T, N> {
                 len,
                 tail,
             } => {
-                // Drop all elements
-                let mut idx = *head;
-                for _ in 0..*len {
+                // Advance the queue past each element *before* dropping it, so
+                // an unwinding destructor cannot leave a dropped slot counted
+                // as live. `head`/`len`/`tail` stay mutually consistent after
+                // every step, including a panic: `head + len == tail` holds.
+                while *len > 0 {
+                    let idx = *head;
+                    *head = if unlikely(*head + 1 == N) {
+                        0
+                    } else {
+                        *head + 1
+                    };
+                    *len -= 1;
                     unsafe {
                         buf[idx].assume_init_drop();
                     }
-                    idx = if unlikely(idx + 1 == N) { 0 } else { idx + 1 };
                 }
                 *head = 0;
                 *tail = 0;
-                *len = 0;
             }
             QueueInternal::Heap(vec) => vec.clear(),
         }
@@ -501,6 +512,11 @@ impl<T, const N: usize> Drop for Queue<T, N> {
 /// Iterator that yields references to elements in the queue
 pub enum Iter<'a, T, const N: usize> {
     /// Iterating the inline storage: a slice plus the ring cursor.
+    ///
+    /// Not constructible outside this crate: the fields carry the invariant
+    /// that `remaining` slots from `head` are initialized, and callers must not
+    /// be able to forge that state.
+    #[non_exhaustive]
     Inline {
         /// The inline backing store; only `remaining` slots from `head` are
         /// live.
@@ -604,6 +620,11 @@ impl<'a, T, const N: usize> IntoIterator for &'a Queue<T, N> {
 /// Mutable iterator over elements in the queue
 pub enum IterMut<'a, T, const N: usize> {
     /// Iterating the inline storage: a slice plus the ring cursor.
+    ///
+    /// Not constructible outside this crate: the fields carry the invariant
+    /// that `remaining` slots from `head` are initialized, and callers must not
+    /// be able to forge that state.
+    #[non_exhaustive]
     Inline {
         /// The inline backing store; only `remaining` slots from `head` are
         /// live.
@@ -1804,5 +1825,46 @@ mod tests {
                 "content mismatch after op {i}"
             );
         }
+    }
+
+    /// A destructor panic during `clear` must not leave an already-dropped slot
+    /// counted as live. Under Miri the stale-state version double-drops.
+    #[test]
+    fn clear_is_panic_safe() {
+        struct Bomb {
+            _data: Box<u8>,
+            armed: bool,
+        }
+        impl Drop for Bomb {
+            fn drop(&mut self) {
+                if self.armed {
+                    panic!("destructor panic");
+                }
+            }
+        }
+
+        let mut q: Queue<Bomb, 4> = Queue::new();
+        q.push_back(Bomb {
+            _data: Box::new(0),
+            armed: false,
+        });
+        q.push_back(Bomb {
+            _data: Box::new(1),
+            armed: true,
+        });
+        q.push_back(Bomb {
+            _data: Box::new(2),
+            armed: false,
+        });
+
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| q.clear()));
+        assert!(unwound.is_err(), "the armed element must unwind");
+
+        // The queue must be self-consistent: only the not-yet-dropped element
+        // may remain, and clearing again must not touch a dropped slot.
+        let live = q.iter().count();
+        assert!(live <= 1, "dropped slots were left live: {live}");
+        q.clear();
+        assert_eq!(q.len(), 0);
     }
 }
