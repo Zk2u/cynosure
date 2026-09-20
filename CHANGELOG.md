@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-09-20
+
+### Fixed
+
+- Internal hardening. No behavior change for correct use.
+
+### Changed
+
+- `queue::Iter` and `queue::IterMut` inline variants are now `#[non_exhaustive]`,
+  so downstream crates cannot construct them directly. Obtain iterators through
+  `Queue::iter`/`iter_mut` as before.
+
 ## [0.6.0] - 2026-07-28
 
 ### Added — new primitives
