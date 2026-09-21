@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-09-21
+
+### Fixed
+
+- Internal hardening across the local locks, queues, channels, and buffers. No
+  behavior change for correct use.
+
+### Changed — API
+
+- `queue::Iter` and `queue::IterMut` are now opaque structs over a private
+  representation. Obtain iterators through `Queue::iter`/`Queue::iter_mut` as
+  before; the type can no longer be constructed or its cursor state read.
+- `bipbuffer::Producer::reserve` panics if `n` exceeds the capacity, rather
+  than waiting forever for an impossible request.
+- `ringbuf::Producer::push_slice_counted` and
+  `ringbuf::Consumer::pop_slice_counted` report how many items were transferred,
+  so an interrupted bulk operation can resume. `push_slice`/`pop_slice` are
+  documented as cancellation-unsafe.
+- `LocalBufferPool` clears a recycled buffer on checkout by default;
+  `with_alignment_uncleared` restores the old behavior for same-trust-domain
+  use.
+
+### Changed — build and release
+
+- `Cargo.lock` is committed and CI/release builds use `--locked`.
+- GitHub Actions are pinned to commit SHAs; workflows declare least-privilege
+  token permissions and the release step runs without executing build code.
+
 ## [0.6.1] - 2026-09-20
 
 ### Fixed
