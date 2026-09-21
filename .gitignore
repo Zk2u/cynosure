@@ -1,5 +1,4 @@
 /target
-Cargo.lock
 
 # chartgen build output (charts themselves are committed)
 tools/chartgen/target/
