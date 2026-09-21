@@ -150,8 +150,10 @@ impl<T: Zeroable + Copy> AlignedBuffer<T> {
     ///
     /// This is safe (unlike `Vec::set_len`): the entire capacity is always a
     /// valid initialized region of `T`, so any `new_len <= capacity` exposes
-    /// only valid elements. Elements beyond what you actually wrote read back
-    /// as their zero value.
+    /// only valid elements. For a **freshly allocated** buffer, elements beyond
+    /// what you actually wrote read back as their zero value. A buffer obtained
+    /// from a [`LocalBufferPool`](crate::site_c::pool::LocalBufferPool) may
+    /// hold a previous borrower's bytes unless the pool clears on checkout.
     ///
     /// # Panics
     /// Panics if `new_len > capacity`.
@@ -168,6 +170,9 @@ impl<T: Zeroable + Copy> AlignedBuffer<T> {
 
     /// The full capacity as a mutable slice, for filling the buffer before
     /// setting its logical [`len`](Self::set_len).
+    ///
+    /// This exposes the whole capacity, including any bytes written by a
+    /// previous borrower of a pooled buffer.
     #[inline]
     pub fn capacity_mut(&mut self) -> &mut [T] {
         // SAFETY: the whole `cap` region is zero-initialized and `T: Zeroable`,

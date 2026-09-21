@@ -231,13 +231,17 @@ impl<T, const N: usize> Queue<T, N> {
     #[inline]
     pub fn iter(&self) -> Iter<'_, T, N> {
         match &self.0 {
-            QueueInternal::Inline { buf, head, len, .. } => Iter::Inline {
-                buf,
-                head: *head,
-                remaining: *len,
-                _phantom: std::marker::PhantomData,
+            QueueInternal::Inline { buf, head, len, .. } => Iter {
+                inner: IterInner::Inline {
+                    buf,
+                    head: *head,
+                    remaining: *len,
+                    _phantom: std::marker::PhantomData,
+                },
             },
-            QueueInternal::Heap(vec) => Iter::Heap(vec.iter()),
+            QueueInternal::Heap(vec) => Iter {
+                inner: IterInner::Heap(vec.iter()),
+            },
         }
     }
 }
@@ -414,6 +418,28 @@ impl<T, const N: usize> Queue<T, N> {
         }
     }
 
+    /// Removes and returns every element for which `remove` returns `true`,
+    /// preserving the order of the survivors. Removed elements are **moved
+    /// out**, never dropped in place, so a caller may hold this queue's
+    /// `UnsafeCell` borrow across the call and drop the returned values
+    /// only after releasing it. Used by the waiter paths, where dropping a
+    /// value can run a user callback that re-enters the primitive.
+    ///
+    /// `remove` must not panic: on unwind the drained temporary would drop the
+    /// removed elements while the caller's borrow is still live.
+    pub fn take_where(&mut self, mut remove: impl FnMut(&T) -> bool) -> Vec<T> {
+        let all = self.into_vec();
+        let mut removed = Vec::new();
+        for item in all {
+            if remove(&item) {
+                removed.push(item);
+            } else {
+                self.push_back(item);
+            }
+        }
+        removed
+    }
+
     /// Removes all elements from the queue.
     ///
     /// The queue state stays consistent if an element's destructor panics: the
@@ -484,13 +510,17 @@ impl<T, const N: usize> Queue<T, N> {
     #[inline]
     pub fn iter_mut(&mut self) -> IterMut<'_, T, N> {
         match &mut self.0 {
-            QueueInternal::Inline { buf, head, len, .. } => IterMut::Inline {
-                buf,
-                head: *head,
-                remaining: *len,
-                _phantom: std::marker::PhantomData,
+            QueueInternal::Inline { buf, head, len, .. } => IterMut {
+                inner: IterMutInner::Inline {
+                    buf,
+                    head: *head,
+                    remaining: *len,
+                    _phantom: std::marker::PhantomData,
+                },
             },
-            QueueInternal::Heap(vec) => IterMut::Heap(vec.iter_mut()),
+            QueueInternal::Heap(vec) => IterMut {
+                inner: IterMutInner::Heap(vec.iter_mut()),
+            },
         }
     }
 }
@@ -509,14 +539,17 @@ impl<T, const N: usize> Drop for Queue<T, N> {
     }
 }
 
-/// Iterator that yields references to elements in the queue
-pub enum Iter<'a, T, const N: usize> {
+/// Iterator that yields references to elements in the queue.
+///
+/// Opaque: the cursor and backing-storage state is private to this crate, so a
+/// caller cannot forge the invariant that `next()` relies on. Obtain one with
+/// [`Queue::iter`].
+pub struct Iter<'a, T, const N: usize> {
+    inner: IterInner<'a, T, N>,
+}
+
+enum IterInner<'a, T, const N: usize> {
     /// Iterating the inline storage: a slice plus the ring cursor.
-    ///
-    /// Not constructible outside this crate: the fields carry the invariant
-    /// that `remaining` slots from `head` are initialized, and callers must not
-    /// be able to forge that state.
-    #[non_exhaustive]
     Inline {
         /// The inline backing store; only `remaining` slots from `head` are
         /// live.
@@ -536,8 +569,8 @@ impl<'a, T, const N: usize> Iterator for Iter<'a, T, N> {
     type Item = &'a T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            Self::Inline {
+        match &mut self.inner {
+            IterInner::Inline {
                 buf,
                 head,
                 remaining,
@@ -552,23 +585,23 @@ impl<'a, T, const N: usize> Iterator for Iter<'a, T, N> {
                     Some(item)
                 }
             }
-            Self::Heap(iter) => iter.next(),
+            IterInner::Heap(iter) => iter.next(),
         }
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        match self {
-            Self::Inline { remaining, .. } => (*remaining, Some(*remaining)),
-            Self::Heap(iter) => iter.size_hint(),
+        match &self.inner {
+            IterInner::Inline { remaining, .. } => (*remaining, Some(*remaining)),
+            IterInner::Heap(iter) => iter.size_hint(),
         }
     }
 }
 
 impl<'a, T, const N: usize> ExactSizeIterator for Iter<'a, T, N> {
     fn len(&self) -> usize {
-        match self {
-            Self::Inline { remaining, .. } => *remaining,
-            Self::Heap(iter) => iter.len(),
+        match &self.inner {
+            IterInner::Inline { remaining, .. } => *remaining,
+            IterInner::Heap(iter) => iter.len(),
         }
     }
 }
@@ -617,14 +650,17 @@ impl<'a, T, const N: usize> IntoIterator for &'a Queue<T, N> {
     }
 }
 
-/// Mutable iterator over elements in the queue
-pub enum IterMut<'a, T, const N: usize> {
+/// Mutable iterator over elements in the queue.
+///
+/// Opaque: the cursor and backing-storage state is private to this crate, so a
+/// caller cannot forge the invariant that `next()` relies on or alias elements.
+/// Obtain one with [`Queue::iter_mut`].
+pub struct IterMut<'a, T, const N: usize> {
+    inner: IterMutInner<'a, T, N>,
+}
+
+enum IterMutInner<'a, T, const N: usize> {
     /// Iterating the inline storage: a slice plus the ring cursor.
-    ///
-    /// Not constructible outside this crate: the fields carry the invariant
-    /// that `remaining` slots from `head` are initialized, and callers must not
-    /// be able to forge that state.
-    #[non_exhaustive]
     Inline {
         /// The inline backing store; only `remaining` slots from `head` are
         /// live.
@@ -644,8 +680,8 @@ impl<'a, T, const N: usize> Iterator for IterMut<'a, T, N> {
     type Item = &'a mut T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            Self::Inline {
+        match &mut self.inner {
+            IterMutInner::Inline {
                 buf,
                 head,
                 remaining,
@@ -670,7 +706,7 @@ impl<'a, T, const N: usize> Iterator for IterMut<'a, T, N> {
                     }
                 }
             }
-            Self::Heap(iter) => iter.next(),
+            IterMutInner::Heap(iter) => iter.next(),
         }
     }
 
@@ -682,9 +718,9 @@ impl<'a, T, const N: usize> Iterator for IterMut<'a, T, N> {
 
 impl<'a, T, const N: usize> ExactSizeIterator for IterMut<'a, T, N> {
     fn len(&self) -> usize {
-        match self {
-            Self::Inline { remaining, .. } => *remaining,
-            Self::Heap(iter) => iter.len(),
+        match &self.inner {
+            IterMutInner::Inline { remaining, .. } => *remaining,
+            IterMutInner::Heap(iter) => iter.len(),
         }
     }
 }

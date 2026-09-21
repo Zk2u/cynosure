@@ -9,6 +9,7 @@ use std::{
     future::Future,
     ops::{Deref, DerefMut},
     pin::Pin,
+    rc::Rc,
     task::{Context, Poll, Waker},
 };
 
@@ -83,8 +84,8 @@ pub struct LocalRwLock<T> {
     // `(id, waker)`: the `id` is a per-future token (NOT the waker), so a
     // future's entry can be removed unambiguously even when two futures of this
     // lock are driven by one task (and thus share a waker).
-    read_waiters: UnsafeCell<Queue<(u64, Waker), 8>>,
-    write_waiters: UnsafeCell<Queue<(u64, Waker), 8>>,
+    read_waiters: UnsafeCell<Queue<(u64, Rc<Waker>), 8>>,
+    write_waiters: UnsafeCell<Queue<(u64, Rc<Waker>), 8>>,
     next_id: Cell<u64>,
     value: UnsafeCell<T>,
 }
@@ -140,7 +141,12 @@ impl<T> LocalRwLock<T> {
     #[inline]
     pub fn try_read(&self) -> Option<LocalRwLockReadGuard<'_, T>> {
         if likely(!self.writer.get()) {
-            self.readers.set(self.readers.get() + 1);
+            self.readers.set(
+                self.readers
+                    .get()
+                    .checked_add(1)
+                    .expect("reader count overflow"),
+            );
             Some(LocalRwLockReadGuard { rwlock: self })
         } else {
             None
@@ -155,7 +161,12 @@ impl<T> LocalRwLock<T> {
         // SAFETY: single-threaded; transient borrow.
         let no_writer_queued = unsafe { (*self.write_waiters.get()).is_empty() };
         if !self.writer.get() && no_writer_queued {
-            self.readers.set(self.readers.get() + 1);
+            self.readers.set(
+                self.readers
+                    .get()
+                    .checked_add(1)
+                    .expect("reader count overflow"),
+            );
             Some(LocalRwLockReadGuard { rwlock: self })
         } else {
             None
@@ -242,13 +253,13 @@ impl<T> LocalRwLock<T> {
         // borrow is held across the re-entrant `wake()` callback.
         let next_writer = unsafe { (*self.write_waiters.get()).pop_front() };
         if let Some((_, waker)) = next_writer {
-            waker.wake();
+            waker.wake_by_ref();
             return;
         }
         loop {
             let next = unsafe { (*self.read_waiters.get()).pop_front() };
             let Some((_, waker)) = next else { break };
-            waker.wake();
+            waker.wake_by_ref();
         }
     }
 }
@@ -260,20 +271,23 @@ impl<T> LocalRwLock<T> {
 /// is the identity, so two futures of this lock sharing one task's waker get
 /// distinct, independently-removable entries.
 fn register_in(
-    cell: &UnsafeCell<Queue<(u64, Waker), 8>>,
+    cell: &UnsafeCell<Queue<(u64, Rc<Waker>), 8>>,
     next_id: &Cell<u64>,
-    slot: &mut Option<(u64, Waker)>,
+    slot: &mut Option<(u64, Rc<Waker>)>,
     waker: &Waker,
 ) {
-    // SAFETY: single-threaded; no borrow held across a callback.
-    let q = unsafe { &mut *cell.get() };
-    // Fast path: skip re-registering only if our entry is *still queued* with an
-    // equivalent waker. (`wake_next` pops the woken entry, so after a
-    // wake-then-barge we must fall through and re-add it.)
-    if let Some((id, w)) = slot.as_ref()
-        && w.will_wake(waker)
-        && q.iter().any(|(qid, _)| qid == id)
-    {
+    // Read-only decision; runs no callbacks. (Skip re-registering only if our
+    // entry is *still queued* with an equivalent waker — `wake_next` pops the
+    // woken entry, so after a wake-then-barge we must re-add it.)
+    let stale = match slot.as_ref() {
+        Some((id, w)) if w.will_wake(waker) => {
+            // SAFETY: single-threaded; the borrow ends before any callback.
+            let q = unsafe { &*cell.get() };
+            !q.iter().any(|(qid, _)| qid == id)
+        }
+        _ => true,
+    };
+    if !stale {
         return;
     }
     let id = match slot {
@@ -284,18 +298,35 @@ fn register_in(
             id
         }
     };
-    q.retain(|(qid, _)| *qid != id);
-    q.push_back((id, waker.clone()));
-    *slot = Some((id, waker.clone()));
+    // Clone the incoming `Waker` **before** borrowing the queue (user callback).
+    let owned = Rc::new(waker.clone());
+    // Structural update only; removed entries drop after the borrow ends.
+    let removed = {
+        // SAFETY: single-threaded; no borrow held across a callback.
+        let q = unsafe { &mut *cell.get() };
+        let removed = q.take_where(|(qid, _)| *qid == id);
+        q.push_back((id, Rc::clone(&owned)));
+        removed
+    };
+    drop(removed);
+    *slot = Some((id, owned));
 }
 
 /// Removes a future's entry from `cell` (on cancel/acquire).
-fn deregister_in(cell: &UnsafeCell<Queue<(u64, Waker), 8>>, slot: &mut Option<(u64, Waker)>) {
-    if let Some((id, _)) = slot.take() {
-        // SAFETY: single-threaded; no borrow held across a callback.
-        let q = unsafe { &mut *cell.get() };
-        q.retain(|(qid, _)| *qid != id);
+fn deregister_in(
+    cell: &UnsafeCell<Queue<(u64, Rc<Waker>), 8>>,
+    slot: &mut Option<(u64, Rc<Waker>)>,
+) {
+    let taken = slot.take();
+    if let Some((id, _)) = &taken {
+        let removed = {
+            // SAFETY: single-threaded; no borrow held across a callback.
+            let q = unsafe { &mut *cell.get() };
+            q.take_where(|(qid, _)| qid == id)
+        };
+        drop(removed);
     }
+    drop(taken);
 }
 
 impl<T: Default> Default for LocalRwLock<T> {
@@ -327,7 +358,7 @@ impl<T: std::fmt::Debug> std::fmt::Debug for LocalRwLock<T> {
 pub struct LocalRwLockReadFuture<'a, T> {
     rwlock: &'a LocalRwLock<T>,
     /// `(id, waker)` entry in `read_waiters`, tracked for removal on cancel.
-    registered: Option<(u64, Waker)>,
+    registered: Option<(u64, Rc<Waker>)>,
 }
 
 impl<'a, T> Future for LocalRwLockReadFuture<'a, T> {
@@ -380,7 +411,7 @@ impl<'a, T> std::fmt::Debug for LocalRwLockReadFuture<'a, T> {
 pub struct LocalRwLockWriteFuture<'a, T> {
     rwlock: &'a LocalRwLock<T>,
     /// `(id, waker)` entry in `write_waiters`, tracked for removal on cancel.
-    registered: Option<(u64, Waker)>,
+    registered: Option<(u64, Rc<Waker>)>,
 }
 
 impl<'a, T> Future for LocalRwLockWriteFuture<'a, T> {

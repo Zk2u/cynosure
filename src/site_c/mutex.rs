@@ -8,6 +8,7 @@ use std::{
     future::Future,
     ops::{Deref, DerefMut},
     pin::Pin,
+    rc::Rc,
     task::{Context, Poll, Waker},
 };
 
@@ -65,7 +66,7 @@ pub struct LocalMutex<T> {
     // used to identify and remove exactly that future's entry. Two futures of
     // the same lock driven by one task share a waker, so `will_wake` can't tell
     // their entries apart — the id can.
-    waiters: UnsafeCell<Queue<(u64, Waker), 8>>,
+    waiters: UnsafeCell<Queue<(u64, Rc<Waker>), 8>>,
     next_id: Cell<u64>,
     value: UnsafeCell<T>,
 }
@@ -149,23 +150,26 @@ impl<T> LocalMutex<T> {
         // re-enter the mutex).
         let next = unsafe { (*self.waiters.get()).pop_front() };
         if let Some((_, waker)) = next {
-            waker.wake();
+            waker.wake_by_ref();
         }
     }
 
     /// Registers (or refreshes) this future's waker, tracking its `(id, waker)`
     /// in `slot` so exactly its own entry can be removed again on cancellation.
     /// Keeps at most one queue entry per live future.
-    fn register(&self, slot: &mut Option<(u64, Waker)>, waker: &Waker) {
-        // SAFETY: single-threaded; no borrow held across a callback.
-        let waiters = unsafe { &mut *self.waiters.get() };
-        // Fast path: skip re-registering only if our entry is *still queued*
-        // with an equivalent waker. (`wake_next` pops the woken entry, so after
-        // a wake-then-barge we must fall through and re-add it.)
-        if let Some((id, w)) = slot.as_ref()
-            && w.will_wake(waker)
-            && waiters.iter().any(|(qid, _)| qid == id)
-        {
+    fn register(&self, slot: &mut Option<(u64, Rc<Waker>)>, waker: &Waker) {
+        // Decide whether to (re-)register using read-only access; this runs no
+        // callbacks. (`wake_next` pops the woken entry, so after a wake-then-barge
+        // we must fall through and re-add it.)
+        let stale = match slot.as_ref() {
+            Some((id, w)) if w.will_wake(waker) => {
+                // SAFETY: single-threaded; the borrow ends before any callback.
+                let waiters = unsafe { &*self.waiters.get() };
+                !waiters.iter().any(|(qid, _)| qid == id)
+            }
+            _ => true,
+        };
+        if !stale {
             return;
         }
         let id = match slot {
@@ -176,18 +180,34 @@ impl<T> LocalMutex<T> {
                 id
             }
         };
-        waiters.retain(|(qid, _)| *qid != id);
-        waiters.push_back((id, waker.clone()));
-        *slot = Some((id, waker.clone()));
-    }
-
-    /// Removes this future's entry from the queue (on cancel/acquire).
-    fn deregister(&self, slot: &mut Option<(u64, Waker)>) {
-        if let Some((id, _)) = slot.take() {
+        // Clone the incoming `Waker` **before** borrowing the waiter queue:
+        // `Waker::clone` is a user callback and may re-enter this primitive.
+        let owned = Rc::new(waker.clone());
+        // Structural update only. Removed entries are moved out and dropped
+        // after the borrow ends, so no user callback runs under it.
+        let removed = {
             // SAFETY: single-threaded; no borrow held across a callback.
             let waiters = unsafe { &mut *self.waiters.get() };
-            waiters.retain(|(qid, _)| *qid != id);
+            let removed = waiters.take_where(|(qid, _)| *qid == id);
+            waiters.push_back((id, Rc::clone(&owned)));
+            removed
+        };
+        drop(removed);
+        *slot = Some((id, owned));
+    }
+
+    fn deregister(&self, slot: &mut Option<(u64, Rc<Waker>)>) {
+        let taken = slot.take();
+        if let Some((id, _)) = &taken {
+            let removed = {
+                // SAFETY: single-threaded; no borrow held across a callback.
+                let waiters = unsafe { &mut *self.waiters.get() };
+                waiters.take_where(|(qid, _)| qid == id)
+            };
+            drop(removed);
         }
+        // The slot's own handle drops last, outside the queue borrow.
+        drop(taken);
     }
 }
 
@@ -219,7 +239,7 @@ pub struct LocalMutexLockFuture<'a, T> {
     mutex: &'a LocalMutex<T>,
     /// This future's `(id, waker)` entry in the mutex's queue, if registered.
     /// Tracked so exactly this entry can be removed on cancellation (drop).
-    registered: Option<(u64, Waker)>,
+    registered: Option<(u64, Rc<Waker>)>,
 }
 
 impl<'a, T> Future for LocalMutexLockFuture<'a, T> {

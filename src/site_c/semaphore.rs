@@ -17,6 +17,7 @@ use std::{
     future::Future,
     marker::PhantomData,
     pin::Pin,
+    rc::Rc,
     task::{Context, Poll, Waker},
 };
 
@@ -28,7 +29,7 @@ pub struct LocalSemaphore {
     permits: Cell<usize>,
     // `(token, n_requested, waker)`. `token` identifies a future's own entry for
     // exact removal (futures of one task share a waker, so identity is the id).
-    waiters: UnsafeCell<Queue<(u64, usize, Waker), 8>>,
+    waiters: UnsafeCell<Queue<(u64, usize, Rc<Waker>), 8>>,
     next_id: Cell<u64>,
     // `!Send`/`!Sync` (single-core).
     _nosync: PhantomData<*const ()>,
@@ -86,11 +87,23 @@ impl LocalSemaphore {
         }
     }
 
+    /// Adds `n` permits with overflow checking, so the accounting cannot wrap
+    /// and silently corrupt backpressure.
+    #[inline]
+    fn bump_permits(&self, n: usize) {
+        self.permits.set(
+            self.permits
+                .get()
+                .checked_add(n)
+                .expect("LocalSemaphore permit count overflow"),
+        );
+    }
+
     /// Add `n` permits to the pool (e.g. grow a resource pool), waking waiters
     /// that can now proceed.
     #[inline]
     pub fn add_permits(&self, n: usize) {
-        self.permits.set(self.permits.get() + n);
+        self.bump_permits(n);
         // SAFETY: single-threaded; the borrow does not cross a callback.
         if !unsafe { (*self.waiters.get()).is_empty() } {
             self.wake_next();
@@ -119,33 +132,42 @@ impl LocalSemaphore {
     #[cold]
     #[inline(never)]
     fn wake_next(&self) {
-        // SAFETY: single-threaded; the borrow lives only for the peek/clone, not
-        // across the `wake()` callback (which may re-enter the semaphore).
-        let front = {
-            let waiters = unsafe { &*self.waiters.get() };
-            // Fast path: no waiters — the overwhelmingly common case on release.
-            // Skips constructing the iterator + the permit re-read entirely.
-            if waiters.is_empty() {
-                return;
-            }
-            waiters
-                .iter()
-                .next()
-                .filter(|(_, n, _)| self.permits.get() >= *n)
-                .map(|(_, _, w)| w.clone())
+        // Peek the front request size under a short read borrow (no callbacks).
+        // SAFETY: single-threaded; the borrow ends before any callback.
+        let front_n = unsafe { &*self.waiters.get() }
+            .iter()
+            .next()
+            .map(|(_, n, _)| *n);
+        let Some(n) = front_n else {
+            return;
         };
-        if let Some(waker) = front {
-            waker.wake();
+        if self.permits.get() < n {
+            return;
+        }
+        // Clone the `Rc` (a refcount bump, not a `Waker` vtable call) under a
+        // short borrow, then `wake()` outside it — the wake is a user callback
+        // and may re-enter the semaphore.
+        // SAFETY: single-threaded; the borrow ends before the wake callback.
+        let waker = unsafe { &*self.waiters.get() }
+            .iter()
+            .next()
+            .map(|(_, _, w)| Rc::clone(w));
+        if let Some(waker) = waker {
+            waker.wake_by_ref();
         }
     }
 
-    fn register(&self, slot: &mut Option<(u64, usize, Waker)>, n: usize, waker: &Waker) {
-        // SAFETY: single-threaded; no borrow held across a callback.
-        let waiters = unsafe { &mut *self.waiters.get() };
-        if let Some((id, _, w)) = slot.as_ref()
-            && w.will_wake(waker)
-            && waiters.iter().any(|(qid, _, _)| qid == id)
-        {
+    fn register(&self, slot: &mut Option<(u64, usize, Rc<Waker>)>, n: usize, waker: &Waker) {
+        // Read-only decision; runs no callbacks.
+        let stale = match slot.as_ref() {
+            Some((id, _, w)) if w.will_wake(waker) => {
+                // SAFETY: single-threaded; the borrow ends before any callback.
+                let waiters = unsafe { &*self.waiters.get() };
+                !waiters.iter().any(|(qid, _, _)| qid == id)
+            }
+            _ => true,
+        };
+        if !stale {
             return;
         }
         let id = match slot {
@@ -156,22 +178,37 @@ impl LocalSemaphore {
                 id
             }
         };
-        waiters.retain(|(qid, _, _)| *qid != id);
-        waiters.push_back((id, n, waker.clone()));
-        *slot = Some((id, n, waker.clone()));
-    }
-
-    fn deregister(&self, slot: &mut Option<(u64, usize, Waker)>) {
-        if let Some((id, _, _)) = slot.take() {
+        // Clone the incoming `Waker` **before** borrowing the queue (a user
+        // callback, which may re-enter the semaphore).
+        let owned = Rc::new(waker.clone());
+        // Structural update only; removed entries drop after the borrow ends.
+        let removed = {
             // SAFETY: single-threaded; no borrow held across a callback.
             let waiters = unsafe { &mut *self.waiters.get() };
-            waiters.retain(|(qid, _, _)| *qid != id);
+            let removed = waiters.take_where(|(qid, _, _)| *qid == id);
+            waiters.push_back((id, n, Rc::clone(&owned)));
+            removed
+        };
+        drop(removed);
+        *slot = Some((id, n, owned));
+    }
+
+    fn deregister(&self, slot: &mut Option<(u64, usize, Rc<Waker>)>) {
+        let taken = slot.take();
+        if let Some((id, _, _)) = &taken {
+            let removed = {
+                // SAFETY: single-threaded; no borrow held across a callback.
+                let waiters = unsafe { &mut *self.waiters.get() };
+                waiters.take_where(|(qid, _, _)| qid == id)
+            };
+            drop(removed);
         }
+        drop(taken);
     }
 
     #[inline]
     fn release(&self, n: usize) {
-        self.permits.set(self.permits.get() + n);
+        self.bump_permits(n);
         // Fast path inlined into `Permit::drop`: no waiters means nothing to
         // wake, the overwhelmingly common uncontended release. SAFETY:
         // single-threaded; the borrow does not cross a callback.
@@ -195,7 +232,7 @@ impl std::fmt::Debug for LocalSemaphore {
 pub struct Acquire<'a> {
     sem: &'a LocalSemaphore,
     n: usize,
-    registered: Option<(u64, usize, Waker)>,
+    registered: Option<(u64, usize, Rc<Waker>)>,
 }
 
 impl<'a> Future for Acquire<'a> {

@@ -29,6 +29,10 @@ struct PoolInner<T: Zeroable + Copy> {
     // semaphore's `waiters`), so no runtime borrow check is needed.
     free: UnsafeCell<Vec<AlignedBuffer<T>>>,
     sem: LocalSemaphore,
+    /// Clear a buffer before handing it to a borrower. On by default: a
+    /// recycled buffer otherwise still holds the previous borrower's bytes,
+    /// which are visible through `capacity_mut()` / a raised `len`.
+    clear_on_checkout: bool,
 }
 
 /// A cloneable handle to a per-core pool of recyclable aligned `T` buffers.
@@ -51,14 +55,27 @@ impl<T: Zeroable + Copy> Clone for LocalBufferPool<T> {
 
 impl<T: Zeroable + Copy> LocalBufferPool<T> {
     /// Pre-allocate `count` buffers of `buf_size` elements, aligned to
-    /// `align_of::<T>()`.
+    /// `align_of::<T>()`. Each checkout clears the buffer, so a borrower cannot
+    /// read the previous borrower's bytes.
     pub fn new(count: usize, buf_size: usize) -> Self {
         Self::with_alignment(count, buf_size, std::mem::align_of::<T>())
     }
 
     /// Pre-allocate `count` buffers of `buf_size` elements, aligned to `align`
-    /// bytes (e.g. `4096` for O_DIRECT).
+    /// bytes (e.g. `4096` for O_DIRECT). Each checkout clears the buffer.
     pub fn with_alignment(count: usize, buf_size: usize, align: usize) -> Self {
+        Self::build(count, buf_size, align, true)
+    }
+
+    /// Like [`with_alignment`](Self::with_alignment), but does **not** clear a
+    /// recycled buffer on checkout. Use only when every borrower is in the same
+    /// trust domain and the retained bytes are not a confidentiality concern —
+    /// this trades that guarantee for one `memset` per checkout.
+    pub fn with_alignment_uncleared(count: usize, buf_size: usize, align: usize) -> Self {
+        Self::build(count, buf_size, align, false)
+    }
+
+    fn build(count: usize, buf_size: usize, align: usize, clear_on_checkout: bool) -> Self {
         let mut free = Vec::with_capacity(count);
         for _ in 0..count {
             free.push(AlignedBuffer::<T>::with_alignment(buf_size, align));
@@ -67,6 +84,7 @@ impl<T: Zeroable + Copy> LocalBufferPool<T> {
             inner: Rc::new(PoolInner {
                 free: UnsafeCell::new(free),
                 sem: LocalSemaphore::new(count),
+                clear_on_checkout,
             }),
         }
     }
@@ -100,7 +118,15 @@ impl<T: Zeroable + Copy> LocalBufferPool<T> {
         // SAFETY: single-threaded; the borrow is dropped before any callback.
         let mut buf =
             unsafe { (*self.inner.free.get()).pop() }.expect("permit implies a free buffer");
-        buf.set_len(0); // hand out a clean logical length (contents are not re-zeroed)
+        buf.set_len(0); // hand out a clean logical length
+        if self.inner.clear_on_checkout {
+            // Scrub the previous borrower's bytes. SAFETY: `T: Zeroable`, so an
+            // all-zero bit pattern is a valid `T`, and `capacity()` elements lie
+            // within the allocation.
+            unsafe {
+                std::ptr::write_bytes(buf.as_mut_ptr(), 0, buf.capacity());
+            }
+        }
         PooledBuffer {
             buf: ManuallyDrop::new(buf),
             pool: self.inner.clone(),
@@ -281,5 +307,32 @@ mod tests {
             ptr_a,
             "the same buffer should be handed back out"
         );
+    }
+
+    #[test]
+    fn checkout_clears_a_recycled_buffer() {
+        let pool = LocalBufferPool::<u8>::new(1, 8);
+        {
+            let mut b = pool.try_acquire().unwrap();
+            b.capacity_mut().fill(0xAB);
+            b.set_len(8);
+        }
+        let mut b = pool.try_acquire().unwrap();
+        assert!(
+            b.capacity_mut().iter().all(|&x| x == 0),
+            "a recycled buffer must be cleared on checkout"
+        );
+    }
+
+    #[test]
+    fn uncleared_pool_keeps_contents_for_same_trust_domain() {
+        let pool = LocalBufferPool::<u8>::with_alignment_uncleared(1, 8, 1);
+        {
+            let mut b = pool.try_acquire().unwrap();
+            b.capacity_mut().fill(0xCD);
+            b.set_len(8);
+        }
+        let mut b = pool.try_acquire().unwrap();
+        assert!(b.capacity_mut().iter().all(|&x| x == 0xCD));
     }
 }
