@@ -247,8 +247,9 @@ pub fn latency_percentiles(title: &str, subtitle: &str, series: &[Series]) -> St
         t::WEIGHT,
     );
 
-    // y gridlines: one per decade.
-    let decades = (hi / lo).log10().round() as i32;
+    // y gridlines: one per decade, capped so a pathological axis span cannot
+    // expand into an unbounded loop.
+    let decades = ((hi / lo).log10().round() as i32).clamp(0, 64);
     for d in 0..=decades {
         let ns = lo * 10f64.powi(d);
         let y = ypos(ns);

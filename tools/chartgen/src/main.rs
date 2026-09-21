@@ -18,7 +18,7 @@ mod svg;
 mod theme;
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -85,7 +85,7 @@ fn main() {
     let data = root.join("docs/bench-data");
     let out = root.join("docs/charts");
     fs::create_dir_all(&out).expect("create docs/charts");
-    let mut written = 0usize;
+    let mut written: BTreeSet<String> = BTreeSet::new();
 
     // ---- throughput / latency bar charts ----
     // Every `throughput*.csv` is merged: `throughput.csv` is curated from the
@@ -115,9 +115,14 @@ fn main() {
         let mut per_chart: BTreeMap<String, Vec<Bar>> = BTreeMap::new();
         for r in rows {
             assert!(r.len() >= 4, "throughput csv: expected 4 fields, got {r:?}");
+            let value: f64 = r[2].parse().unwrap_or_else(|e| panic!("{:?}: {e}", r[2]));
+            assert!(
+                value.is_finite(),
+                "throughput csv: value must be finite, got {value:?}"
+            );
             per_chart.entry(r[0].clone()).or_default().push(Bar {
                 label: r[1].clone(),
-                value: r[2].parse().unwrap_or_else(|e| panic!("{:?}: {e}", r[2])),
+                value,
                 hero: r[3] == "1" || r[3].eq_ignore_ascii_case("true"),
             });
         }
@@ -186,6 +191,17 @@ fn main() {
             };
             let p: f64 = r[2].parse().unwrap_or_else(|e| panic!("{:?}: {e}", r[2]));
             let ns: f64 = r[3].parse().unwrap_or_else(|e| panic!("{:?}: {e}", r[3]));
+            // Reject values the renderer cannot plot: a non-finite percentile or
+            // latency would blow up the logarithmic axis (billions of gridlines)
+            // or place points at infinity.
+            assert!(
+                p.is_finite() && (0.0..1.0).contains(&p),
+                "latency csv: percentile must be in [0, 1), got {p:?}"
+            );
+            assert!(
+                ns.is_finite() && ns > 0.0,
+                "latency csv: latency must be finite and positive, got {ns:?}"
+            );
             list[idx].points.push((p, ns));
         }
         for (chart, mut series) in per_chart {
@@ -204,26 +220,66 @@ fn main() {
         }
     }
 
-    if written == 0 {
+    if written.is_empty() {
         eprintln!(
             "no input found in {} — run `cargo bench` first",
             data.display()
         );
         std::process::exit(1);
     }
-    println!("{written} chart(s) written to {}", out.display());
+    println!("{} chart(s) written to {}", written.len(), out.display());
 }
 
-/// Write `<chart>.svg` and its 4x `<chart>.png`.
-fn emit(out: &Path, chart: &str, svg: &str, note: &str, written: &mut usize) {
-    let svg_path = out.join(format!("{chart}.svg"));
+/// Map a chart id (which originates in CSV data) to a safe single-component file
+/// name. Only ASCII alphanumerics, `-`, `_` and `.` survive; leading dots are
+/// stripped so the result is never a parent/current-directory or hidden name.
+/// With no path separators left, `join` cannot escape the output directory.
+fn slug(chart: &str) -> String {
+    let mut out: String = chart
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    while out.starts_with('.') {
+        out.remove(0);
+    }
+    if out.is_empty() {
+        out.push_str("chart");
+    }
+    out
+}
+
+/// Write `<chart>.svg` and its 4x `<chart>.png`. `written` also tracks the file
+/// names emitted, so two distinct chart ids that slug to the same name fail
+/// loudly instead of silently overwriting each other.
+fn emit(out: &Path, chart: &str, svg: &str, note: &str, written: &mut BTreeSet<String>) {
+    let name = slug(chart);
+    assert!(
+        written.insert(name.clone()),
+        "two chart ids map to the same output name {name:?}; rename one"
+    );
+    let svg_path = out.join(format!("{name}.svg"));
+    let png_path = out.join(format!("{name}.png"));
+    // Refuse to follow a pre-positioned symlink out of `docs/charts`.
+    for p in [&svg_path, &png_path] {
+        if let Ok(md) = p.symlink_metadata() {
+            assert!(
+                !md.file_type().is_symlink(),
+                "refusing to write through symlink {}",
+                p.display()
+            );
+        }
+    }
     fs::write(&svg_path, svg).expect("write svg");
-    let png_path = out.join(format!("{chart}.png"));
     match render::png(svg, &png_path) {
         Ok((w, h)) => println!("  {chart:<28} {note:<12} svg + png {w}x{h}"),
         Err(e) => eprintln!("  {chart:<28} {note:<12} svg only — png failed: {e}"),
     }
-    *written += 1;
 }
 
 /// Small helper so a chart without directives still renders with its id.
