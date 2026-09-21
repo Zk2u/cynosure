@@ -40,7 +40,14 @@ struct Inner {
     write: CachePadded<AtomicUsize>,
     read: CachePadded<AtomicUsize>,
     last: AtomicUsize,
-    reserve: AtomicUsize,
+    /// Seqlock guard for the fully-drained cursor reset: even = stable, odd =
+    /// the producer is canonicalizing `read`/`write`/`last`. The consumer
+    /// retries on an odd or changed value, so it never observes a torn
+    /// cursor triple.
+    epoch: AtomicUsize,
+    /// In-progress flags. Both are also wait predicates, so they participate in
+    /// the `WaiterSlot` lost-wakeup handshake: cleared with `SeqCst` stores and
+    /// gated with `SeqCst` loads (see `try_reserve`/`try_read`).
     wip: AtomicBool,
     rip: AtomicBool,
 
@@ -71,7 +78,7 @@ pub fn bip_buffer_aligned(cap: usize, align: usize) -> (Producer, Consumer) {
         write: CachePadded::new(AtomicUsize::new(0)),
         read: CachePadded::new(AtomicUsize::new(0)),
         last: AtomicUsize::new(cap),
-        reserve: AtomicUsize::new(0),
+        epoch: AtomicUsize::new(0),
         wip: AtomicBool::new(false),
         rip: AtomicBool::new(false),
         data: CachePadded::new(WaiterSlot::new()),
@@ -96,10 +103,10 @@ impl Inner {
     /// Try to reserve `n` contiguous bytes; returns the region `[start,
     /// start+n)`.
     fn try_reserve(&self, n: usize) -> Option<(usize, usize)> {
-        // Acquire: pairs with the Release clear in `WriteGrant::commit`/`drop`,
-        // so a grant released on another thread publishes its buffer accesses
-        // before a new reservation here can overlap them.
-        if unlikely(self.wip.load(Ordering::Acquire)) {
+        // SeqCst: this is both the exclusivity gate and the waiter's re-check
+        // load, so it must join the same total order as `commit`/`drop`'s
+        // `SeqCst` clear and the `space.signal()` flag-load (WaiterSlot).
+        if unlikely(self.wip.load(Ordering::SeqCst)) {
             return None; // a write grant is already outstanding
         }
         // A contiguous region can never exceed the capacity. Reject oversized
@@ -110,8 +117,27 @@ impl Inner {
         if unlikely(n > self.cap) {
             return None;
         }
-        let read = self.read.load(Ordering::SeqCst);
-        let write = self.write.load(Ordering::Relaxed);
+        let mut read = self.read.load(Ordering::SeqCst);
+        let mut write = self.write.load(Ordering::Relaxed);
+
+        // Fully drained, but the cursors are stranded mid-buffer (`read == write
+        // == R != 0`): the tail is `cap - R` and a head reservation needs
+        // `n < R`, so a valid `n` can fit in neither region and the producer
+        // would park forever on an empty buffer. Reset both cursors to the head.
+        //
+        // No grant can be outstanding here (`read == write` means `try_read`
+        // sees length 0 and never sets `rip`), so the only concurrent access is
+        // the consumer *reading* the cursors; the `epoch` seqlock makes that
+        // read atomic with respect to this reset.
+        if read == write && write != 0 {
+            self.epoch.fetch_add(1, Ordering::SeqCst); // odd: resetting
+            self.read.store(0, Ordering::SeqCst);
+            self.write.store(0, Ordering::SeqCst);
+            self.last.store(self.cap, Ordering::SeqCst);
+            self.epoch.fetch_add(1, Ordering::SeqCst); // even: stable
+            read = 0;
+            write = 0;
+        }
 
         let start = if write < read {
             // Inverted: free space is the gap (write, read). Keep one byte so
@@ -130,20 +156,33 @@ impl Inner {
             return None;
         };
 
-        self.reserve.store(start + n, Ordering::Relaxed);
-        self.wip.store(true, Ordering::Release);
+        self.wip.store(true, Ordering::SeqCst);
         Some((start, n))
     }
 
     /// Try to get the contiguous readable region; returns `[start, start+len)`.
     fn try_read(&self) -> Option<(usize, usize)> {
-        // Acquire: pairs with the Release clear in `ReadGrant::release`/`drop`.
-        if unlikely(self.rip.load(Ordering::Acquire)) {
+        // SeqCst: this is both the exclusivity gate and the waiter's re-check
+        // load, so it must join the same total order as `release`/`drop`'s
+        // `SeqCst` clear and the `data.signal()` flag-load (WaiterSlot).
+        if unlikely(self.rip.load(Ordering::SeqCst)) {
             return None;
         }
-        let write = self.write.load(Ordering::SeqCst);
-        let mut read = self.read.load(Ordering::Relaxed);
-        let last = self.last.load(Ordering::Acquire);
+        // Atomic read of the cursor triple: retry while the producer holds the
+        // `epoch` reset (odd) or if it changed while we were loading (torn).
+        let (write, mut read, last) = loop {
+            let e1 = self.epoch.load(Ordering::SeqCst);
+            if e1 & 1 == 1 {
+                std::hint::spin_loop();
+                continue;
+            }
+            let write = self.write.load(Ordering::SeqCst);
+            let read = self.read.load(Ordering::SeqCst);
+            let last = self.last.load(Ordering::Acquire);
+            if self.epoch.load(Ordering::SeqCst) == e1 {
+                break (write, read, last);
+            }
+        };
 
         // Consumed up to the watermark while inverted: wrap to the head. This
         // frees the upper region, so wake a producer waiting on space.
@@ -182,8 +221,17 @@ impl Producer {
     }
 
     /// Reserve `n` contiguous bytes, waiting until space is available.
+    ///
+    /// # Panics
+    /// Panics if `n > capacity`: a fixed-capacity bip buffer can never satisfy
+    /// that request, so parking would strand the task forever.
     #[inline]
     pub fn reserve(&mut self, n: usize) -> Reserve<'_> {
+        assert!(
+            n <= self.inner.cap,
+            "reserve({n}) exceeds bip-buffer capacity {}",
+            self.inner.cap
+        );
         Reserve { producer: self, n }
     }
 
@@ -277,9 +325,13 @@ impl WriteGrant {
         // Publish (SeqCst): pairs with the consumer's SeqCst `write` re-check and
         // the `data.signal()` flag-load — the SB-free wakeup handshake.
         inner.write.store(self.start + used, Ordering::SeqCst);
-        // Release: a producer on another thread that later observes this clear
-        // (Acquire load in `try_reserve`) must see the published state above.
-        inner.wip.store(false, Ordering::Release);
+        // SeqCst (not Release): `wip` is a wait predicate, so this clear must
+        // pair with the `SeqCst` re-check in `try_reserve` and the
+        // `space.signal()` flag-load — the SB-free wakeup handshake.
+        inner.wip.store(false, Ordering::SeqCst);
+        // A same-side `reserve()` future may be parked on `space` because `wip`
+        // was set; wake it now that the flag is clear.
+        inner.space.signal();
         inner.data.signal();
         // `self` drops here; `handed_back` makes that drop a no-op.
     }
@@ -293,9 +345,9 @@ impl Drop for WriteGrant {
             return;
         }
         // Abandon the reservation if it was never committed (nothing published).
-        if self.inner.wip.swap(false, Ordering::Release) {
-            let w = self.inner.write.load(Ordering::Relaxed);
-            self.inner.reserve.store(w, Ordering::Relaxed);
+        if self.inner.wip.swap(false, Ordering::SeqCst) {
+            // A same-side `reserve()` future parked because `wip` was set.
+            self.inner.space.signal();
         }
     }
 }
@@ -339,8 +391,10 @@ impl ReadGrant {
         // Publish (SeqCst): pairs with the producer's SeqCst `read` re-check and
         // the `space.signal()` flag-load.
         inner.read.store(read + used, Ordering::SeqCst);
-        // Release: pairs with the Acquire load in `try_read`.
-        inner.rip.store(false, Ordering::Release);
+        // SeqCst: `rip` is a wait predicate (see `commit`).
+        inner.rip.store(false, Ordering::SeqCst);
+        // A same-side `read()` future parked because `rip` was set.
+        inner.data.signal();
         inner.space.signal();
     }
 }
@@ -352,8 +406,10 @@ impl Drop for ReadGrant {
             return;
         }
         // Not released: leave the data readable (read unchanged), just clear the
-        // in-progress flag (Release: pairs with the Acquire load in `try_read`).
-        self.inner.rip.store(false, Ordering::Release);
+        // in-progress flag (SeqCst: `rip` is a wait predicate — see `commit`),
+        // and wake a same-side `read()` future parked on it.
+        self.inner.rip.store(false, Ordering::SeqCst);
+        self.inner.data.signal();
     }
 }
 
@@ -636,5 +692,87 @@ mod tests {
             }
             worker.join().unwrap();
         }
+    }
+
+    /// A fully drained buffer whose cursors are stranded mid-buffer must still
+    /// accept a fresh reservation (both cursors are canonicalized to the head).
+    #[test]
+    fn drained_buffer_can_reserve_again() {
+        for cap in [1usize, 2, 3, 5, 8, 16] {
+            let (mut p, mut c) = bip_buffer(cap);
+            let g = p.try_reserve(cap).unwrap();
+            g.commit(cap);
+            assert_eq!(drain(&mut c).len(), cap, "cap {cap}");
+            assert!(c.try_read().is_none());
+            // Empty, but previously stranded at `cap`: a fresh full reservation
+            // must succeed instead of parking forever.
+            let g = p.try_reserve(cap).unwrap();
+            g.commit(cap);
+            assert_eq!(drain(&mut c).len(), cap, "cap {cap} second round");
+        }
+    }
+
+    /// The `(5, 5)` at capacity 8 case: a drained buffer stranded at an offset
+    /// accepts a reservation that fits neither the tail nor the strict head
+    /// gap.
+    #[test]
+    fn drained_offset_buffer_can_reserve_again() {
+        let (mut p, mut c) = bip_buffer(8);
+        let mut g = p.try_reserve(5).unwrap();
+        g.as_mut_slice().fill(7);
+        g.commit(5);
+        assert_eq!(drain(&mut c).len(), 5);
+        let mut g = p.try_reserve(5).expect("empty buffer must accept 5 bytes");
+        g.as_mut_slice().fill(9);
+        g.commit(5);
+        assert_eq!(drain(&mut c), vec![9; 5]);
+    }
+
+    /// An oversized async reservation is rejected up front instead of parking.
+    #[test]
+    #[should_panic(expected = "exceeds bip-buffer capacity")]
+    fn oversized_reserve_panics() {
+        let (mut p, _c) = bip_buffer(8);
+        let _ = p.reserve(9);
+    }
+
+    /// A `reserve()` future parked while a grant is outstanding must be woken
+    /// when that grant clears (here, an abandoned grant).
+    #[test]
+    fn same_side_reserve_is_woken_when_grant_clears() {
+        use std::{
+            pin::Pin,
+            sync::{
+                Arc,
+                atomic::{AtomicBool, Ordering as O},
+            },
+            task::{Wake, Waker},
+        };
+
+        struct Flag(Arc<AtomicBool>);
+        impl Wake for Flag {
+            fn wake(self: Arc<Self>) {
+                self.0.store(true, O::SeqCst);
+            }
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.0.store(true, O::SeqCst);
+            }
+        }
+
+        let (mut p, _c) = bip_buffer(8);
+        let first = p.try_reserve(8).unwrap();
+
+        let flag = Arc::new(AtomicBool::new(false));
+        let waker: Waker = Arc::new(Flag(flag.clone())).into();
+        let mut cx = Context::from_waker(&waker);
+        let mut fut = p.reserve(8);
+        assert!(Pin::new(&mut fut).poll(&mut cx).is_pending());
+
+        flag.store(false, O::SeqCst);
+        drop(first); // clears `wip`
+        assert!(
+            flag.load(O::SeqCst),
+            "parked reserve must be woken when `wip` clears"
+        );
     }
 }

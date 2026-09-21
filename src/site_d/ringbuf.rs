@@ -289,19 +289,43 @@ impl<T> Producer<T> {
     }
 
     /// Push multiple items from a slice asynchronously
-    /// Waits if the buffer becomes full until all items are pushed
+    /// Waits if the buffer becomes full until all items are pushed.
+    ///
+    /// # Cancellation
+    ///
+    /// This future is **not** cancellation-safe: it may transfer a prefix of
+    /// `items` and then return `Pending`, and that count is not reported. If
+    /// you drop it (a timeout, `select!`, a cancelled task) and retry with
+    /// the whole slice, the transferred prefix is pushed twice. When
+    /// cancellation can happen, use
+    /// [`push_slice_counted`](Self::push_slice_counted), which reports how
+    /// many items were taken.
     pub async fn push_slice(&mut self, items: &[T])
     where
         T: Copy,
     {
+        let mut sink = 0usize;
+        self.push_slice_counted(items, &mut sink).await
+    }
+
+    /// Like [`push_slice`](Self::push_slice), but writes the number of items
+    /// pushed so far into `pushed` on every step. If the returned future is
+    /// dropped mid-transfer, `pushed` still holds the count of items already
+    /// pushed — so a retry can resume from there instead of duplicating.
+    pub async fn push_slice_counted(&mut self, items: &[T], pushed: &mut usize)
+    where
+        T: Copy,
+    {
         if items.is_empty() {
+            *pushed = 0;
             return;
         }
 
         // First try to push as many as possible synchronously
-        let pushed = self.try_push_slice(items);
+        let n = self.try_push_slice(items);
+        *pushed = n;
 
-        if pushed == items.len() {
+        if n == items.len() {
             return;
         }
 
@@ -309,7 +333,8 @@ impl<T> Producer<T> {
         PushSliceFuture {
             producer: self,
             items,
-            pushed_so_far: pushed,
+            pushed_so_far: n,
+            progress: Some(pushed),
         }
         .await
     }
@@ -515,19 +540,41 @@ impl<T> Consumer<T> {
     }
 
     /// Pop multiple items into a slice asynchronously
-    /// Waits if the buffer becomes empty until all items are popped
+    /// Waits if the buffer becomes empty until all items are popped.
+    ///
+    /// # Cancellation
+    ///
+    /// This future is **not** cancellation-safe: it may have already removed a
+    /// prefix of the messages before returning `Pending`, and that count is not
+    /// reported, so those messages are silently lost on drop. When cancellation
+    /// can happen, use [`pop_slice_counted`](Self::pop_slice_counted), which
+    /// reports how many items were taken.
     pub async fn pop_slice(&mut self, items: &mut [T])
     where
         T: Copy,
     {
+        let mut sink = 0usize;
+        self.pop_slice_counted(items, &mut sink).await
+    }
+
+    /// Like [`pop_slice`](Self::pop_slice), but writes the number of items
+    /// popped so far into `popped` on every step. If the returned future is
+    /// dropped mid-transfer, `popped` still holds the count of items
+    /// already removed.
+    pub async fn pop_slice_counted(&mut self, items: &mut [T], popped: &mut usize)
+    where
+        T: Copy,
+    {
         if items.is_empty() {
+            *popped = 0;
             return;
         }
 
         // First try to pop as many as possible synchronously
-        let popped = self.try_pop_slice(items);
+        let n = self.try_pop_slice(items);
+        *popped = n;
 
-        if popped == items.len() {
+        if n == items.len() {
             return;
         }
 
@@ -535,7 +582,8 @@ impl<T> Consumer<T> {
         PopSliceFuture {
             consumer: self,
             items,
-            popped_so_far: popped,
+            popped_so_far: n,
+            progress: Some(popped),
         }
         .await
     }
@@ -686,6 +734,8 @@ struct PushSliceFuture<'a, T> {
     producer: &'a mut Producer<T>,
     items: &'a [T],
     pushed_so_far: usize,
+    /// Sink for the partial count, so an interrupted transfer is observable.
+    progress: Option<&'a mut usize>,
 }
 
 impl<'a, T: Copy> std::future::Future for PushSliceFuture<'a, T> {
@@ -705,6 +755,9 @@ impl<'a, T: Copy> std::future::Future for PushSliceFuture<'a, T> {
                 return Poll::Ready(());
             }
         }
+        if let Some(p) = &mut this.progress {
+            **p = this.pushed_so_far;
+        }
 
         // Register waker BEFORE re-checking to avoid race condition
         // Arm before re-checking (SB-free handshake; see `WaiterSlot`).
@@ -722,6 +775,9 @@ impl<'a, T: Copy> std::future::Future for PushSliceFuture<'a, T> {
                 return Poll::Ready(());
             }
         }
+        if let Some(p) = &mut this.progress {
+            **p = this.pushed_so_far;
+        }
 
         Poll::Pending
     }
@@ -732,6 +788,8 @@ struct PopSliceFuture<'a, T> {
     consumer: &'a mut Consumer<T>,
     items: &'a mut [T],
     popped_so_far: usize,
+    /// Sink for the partial count, so an interrupted transfer is observable.
+    progress: Option<&'a mut usize>,
 }
 
 impl<'a, T: Copy> std::future::Future for PopSliceFuture<'a, T> {
@@ -751,6 +809,9 @@ impl<'a, T: Copy> std::future::Future for PopSliceFuture<'a, T> {
                 return Poll::Ready(());
             }
         }
+        if let Some(p) = &mut this.progress {
+            **p = this.popped_so_far;
+        }
 
         // Register waker BEFORE re-checking to avoid race condition
         // Arm before re-checking (SB-free handshake; see `WaiterSlot`).
@@ -767,6 +828,9 @@ impl<'a, T: Copy> std::future::Future for PopSliceFuture<'a, T> {
                 this.consumer.shared.consumer_slot.disarm();
                 return Poll::Ready(());
             }
+        }
+        if let Some(p) = &mut this.progress {
+            **p = this.popped_so_far;
         }
 
         Poll::Pending
@@ -1148,5 +1212,51 @@ mod tests {
             bulk_time < individual_time / 2,
             "Bulk operations should be at least 2x faster"
         );
+    }
+
+    /// The counted bulk API reports partial progress, so an interrupted
+    /// transfer is resumable rather than duplicated or silently consumed.
+    #[test]
+    fn push_slice_counted_reports_partial_progress() {
+        use std::{
+            future::Future,
+            task::{Context, Waker},
+        };
+
+        let (mut producer, mut consumer) = RingBuf::<u8>::new(4).split();
+        let data = [1u8, 2, 3, 4, 5, 6];
+        let mut pushed = 0usize;
+        {
+            let mut fut = Box::pin(producer.push_slice_counted(&data, &mut pushed));
+            let mut cx = Context::from_waker(Waker::noop());
+            // Only four fit; the rest parks.
+            let _ = fut.as_mut().poll(&mut cx);
+        }
+        assert_eq!(pushed, 4, "four of six items transferred before parking");
+        let mut out = [0u8; 6];
+        assert_eq!(consumer.try_pop_slice(&mut out), 4);
+        assert_eq!(&out[..4], &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn pop_slice_counted_reports_partial_progress() {
+        use std::{
+            future::Future,
+            task::{Context, Waker},
+        };
+
+        let (mut producer, mut consumer) = RingBuf::<u8>::new(4).split();
+        for b in [1u8, 2, 3, 4] {
+            producer.try_push(b).unwrap();
+        }
+        let mut out = [0u8; 6];
+        let mut popped = 0usize;
+        {
+            let mut fut = Box::pin(consumer.pop_slice_counted(&mut out, &mut popped));
+            let mut cx = Context::from_waker(Waker::noop());
+            let _ = fut.as_mut().poll(&mut cx);
+        }
+        assert_eq!(popped, 4, "four of six slots filled before parking");
+        assert_eq!(&out[..4], &[1, 2, 3, 4]);
     }
 }

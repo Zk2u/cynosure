@@ -428,6 +428,10 @@ impl<T: Zeroable + Copy> Drop for TripleBuffer<T> {
 /// Non-cloneable. `Send` (move across threads) but not `Sync` (don't share).
 pub struct TripleBufWriter<T: Zeroable + Copy> {
     inner: Arc<TripleBuffer<T>>,
+    /// The buffer in flight: filled by the caller, held here while `publish`
+    /// waits. Kept on the handle (not the future) so cancelling the future
+    /// cannot destroy a circulating buffer.
+    held: Option<AlignedBuffer<T>>,
     _nosync: PhantomData<Cell<()>>,
 }
 
@@ -436,6 +440,9 @@ pub struct TripleBufWriter<T: Zeroable + Copy> {
 /// Non-cloneable. `Send` (move across threads) but not `Sync` (don't share).
 pub struct TripleBufReader<T: Zeroable + Copy> {
     inner: Arc<TripleBuffer<T>>,
+    /// The caller's previous buffer, held here while `next` waits (see
+    /// [`TripleBufWriter`]).
+    held: Option<AlignedBuffer<T>>,
     _nosync: PhantomData<Cell<()>>,
 }
 
@@ -462,10 +469,12 @@ pub fn triple_buffer_aligned<T: Zeroable + Copy>(
     let inner = Arc::new(tb);
     let writer = TripleBufWriter {
         inner: inner.clone(),
+        held: None,
         _nosync: PhantomData,
     };
     let reader = TripleBufReader {
         inner,
+        held: None,
         _nosync: PhantomData,
     };
     (writer, reader, wbuf)
@@ -479,20 +488,36 @@ impl<T: Zeroable + Copy> TripleBufWriter<T> {
     /// `buf` must have come from this triple buffer (same capacity and
     /// alignment).
     ///
+    /// While the returned future is pending, `buf` is held by this handle, not
+    /// by the future. If the future is **cancelled** (dropped before it
+    /// resolves), recover `buf` with
+    /// [`take_held_buffer`](Self::take_held_buffer) before publishing again
+    /// — otherwise the fixed three-buffer pool drains.
+    ///
     /// Requires `&mut self`, so only one publish future can exist at a time.
     ///
     /// # Panics
     /// Panics if `buf`'s capacity or alignment does not match this triple
-    /// buffer.
+    /// buffer, or if a previous publish was cancelled and its buffer was not
+    /// taken back.
     pub fn publish(&mut self, buf: AlignedBuffer<T>) -> WriterPublish<'_, T> {
         assert!(
             buf.capacity() == self.inner.cap && buf.alignment() == self.inner.align,
             "buffer geometry does not match this triple buffer"
         );
-        WriterPublish {
-            tb: &self.inner,
-            buf: Some(buf),
-        }
+        assert!(
+            self.held.is_none(),
+            "a previous publish was cancelled; call take_held_buffer() first"
+        );
+        self.held = Some(buf);
+        WriterPublish { writer: self }
+    }
+
+    /// Take back the buffer held by an in-flight or cancelled `publish`.
+    /// Returns `None` when no buffer is held (the normal state between
+    /// operations).
+    pub fn take_held_buffer(&mut self) -> Option<AlignedBuffer<T>> {
+        self.held.take()
     }
 
     /// Non-blocking [`publish`](Self::publish). Returns `Ok(next_buffer)` if
@@ -526,25 +551,36 @@ impl<T: Zeroable + Copy> TripleBufReader<T> {
     /// `Some(previous)` on every call afterwards to return your last buffer to
     /// the pool.
     ///
-    /// Failing to return previous buffers drains the fixed pool of three and
-    /// will eventually panic.
+    /// Your previous buffer is held by this handle, not the future, while the
+    /// call waits. If the future is cancelled, recover it with
+    /// [`take_held_buffer`](Self::take_held_buffer) before calling `next`
+    /// again.
     ///
     /// Requires `&mut self`, so only one read future can exist at a time.
     ///
     /// # Panics
     /// Panics if `previous`'s capacity or alignment does not match this triple
-    /// buffer.
+    /// buffer, or if a previous read was cancelled and its buffer was not taken
+    /// back.
     pub fn next(&mut self, previous: Option<AlignedBuffer<T>>) -> ReaderNext<'_, T> {
-        if let Some(ref b) = previous {
+        if let Some(b) = previous {
             assert!(
                 b.capacity() == self.inner.cap && b.alignment() == self.inner.align,
                 "buffer geometry does not match this triple buffer"
             );
+            assert!(
+                self.held.is_none(),
+                "a previous read was cancelled; call take_held_buffer() first"
+            );
+            self.held = Some(b);
         }
-        ReaderNext {
-            tb: &self.inner,
-            prev: previous,
-        }
+        ReaderNext { reader: self }
+    }
+
+    /// Take back the buffer held by an in-flight or cancelled `next`. Returns
+    /// `None` when no buffer is held.
+    pub fn take_held_buffer(&mut self) -> Option<AlignedBuffer<T>> {
+        self.held.take()
     }
 
     /// Non-blocking [`next`](Self::next). Returns `Ok(published_buffer)` if a
@@ -576,35 +612,38 @@ impl<T: Zeroable + Copy> TripleBufReader<T> {
 
 /// Future returned by [`TripleBufWriter::publish`].
 pub struct WriterPublish<'a, T: Zeroable + Copy> {
-    tb: &'a TripleBuffer<T>,
-    buf: Option<AlignedBuffer<T>>,
+    writer: &'a mut TripleBufWriter<T>,
 }
 
-impl<'a, T: Zeroable + Copy> Future for WriterPublish<'a, T> {
+impl<T: Zeroable + Copy> Future for WriterPublish<'_, T> {
     type Output = AlignedBuffer<T>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // SAFETY: this future holds no address-sensitive state; the only field
-        // we move is the owned (movable) `AlignedBuffer` out of the `Option`.
-        let this = unsafe { self.get_unchecked_mut() };
-        let buf = this.buf.take().expect("polled after completion");
+        let this = self.get_mut();
+        // The buffer lives on the handle, so cancelling this future loses
+        // nothing; `poll` moves it out and puts it back on `Pending`.
+        let buf = this
+            .writer
+            .held
+            .take()
+            .expect("polled without a held buffer");
 
         // Fast path: same sync op as `try_publish`.
-        let buf = match this.tb.try_publish_now(buf) {
+        let buf = match this.writer.inner.try_publish_now(buf) {
             Ok(next) => return Poll::Ready(next),
             Err(buf) => buf,
         };
 
         // Arm before re-checking: `arm` + the SeqCst re-check in `middle_free`
         // form the SB-free handshake with the reader's publish/signal.
-        this.tb.writer_slot.arm(cx.waker());
-        match this.tb.try_publish_now(buf) {
+        this.writer.inner.writer_slot.arm(cx.waker());
+        match this.writer.inner.try_publish_now(buf) {
             Ok(next) => {
-                this.tb.writer_slot.disarm();
+                this.writer.inner.writer_slot.disarm();
                 Poll::Ready(next)
             }
             Err(buf) => {
-                this.buf = Some(buf);
+                this.writer.held = Some(buf);
                 Poll::Pending
             }
         }
@@ -613,33 +652,32 @@ impl<'a, T: Zeroable + Copy> Future for WriterPublish<'a, T> {
 
 /// Future returned by [`TripleBufReader::next`].
 pub struct ReaderNext<'a, T: Zeroable + Copy> {
-    tb: &'a TripleBuffer<T>,
-    prev: Option<AlignedBuffer<T>>,
+    reader: &'a mut TripleBufReader<T>,
 }
 
-impl<'a, T: Zeroable + Copy> Future for ReaderNext<'a, T> {
+impl<T: Zeroable + Copy> Future for ReaderNext<'_, T> {
     type Output = AlignedBuffer<T>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // SAFETY: see `WriterPublish::poll`.
-        let this = unsafe { self.get_unchecked_mut() };
+        let this = self.get_mut();
+        let prev = this.reader.held.take();
 
         // Fast path: same sync op as `try_next`.
-        let prev = match this.tb.try_take_now(this.prev.take()) {
+        let prev = match this.reader.inner.try_take_now(prev) {
             Ok(buf) => return Poll::Ready(buf),
             Err(prev) => prev,
         };
 
         // Arm before re-checking: `arm` + the SeqCst re-check in `has_unread`
         // form the SB-free handshake with the writer's publish/signal.
-        this.tb.reader_slot.arm(cx.waker());
-        match this.tb.try_take_now(prev) {
+        this.reader.inner.reader_slot.arm(cx.waker());
+        match this.reader.inner.try_take_now(prev) {
             Ok(buf) => {
-                this.tb.reader_slot.disarm();
+                this.reader.inner.reader_slot.disarm();
                 Poll::Ready(buf)
             }
             Err(prev) => {
-                this.prev = prev;
+                this.reader.held = prev;
                 Poll::Pending
             }
         }
@@ -1055,5 +1093,61 @@ mod tests {
         let _next = poll_ready_once(writer.publish(wbuf));
         let rbuf = poll_ready_once(reader.next(None));
         assert_eq!(rbuf[0], 0xDEAD_BEEF);
+    }
+
+    // ---- cancellation keeps buffers owned by the handle ----
+
+    #[test]
+    fn cancelled_publish_keeps_its_buffer() {
+        let (mut writer, mut reader, mut wbuf) = u8_triple();
+
+        write_seq(&mut wbuf, 1);
+        let mut next = poll_ready_once(writer.publish(wbuf)); // middle now holds 1
+        write_seq(&mut next, 2);
+
+        // A second publish parks (middle holds unread data), then is cancelled.
+        let mut publish = writer.publish(next);
+        let (waker, _) = thread_unpark_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(matches!(
+            Pin::new(&mut publish).poll(&mut cx),
+            Poll::Pending
+        ));
+        drop(publish);
+
+        // The buffer is recoverable from the handle, not lost.
+        let recovered = writer
+            .take_held_buffer()
+            .expect("cancelled publish must keep its buffer");
+        assert_eq!(read_seq(&recovered), 2);
+
+        // The pool still rotates correctly on the recovered buffer.
+        let rbuf = poll_ready_once(reader.next(None));
+        assert_eq!(read_seq(&rbuf), 1);
+        let _next = poll_ready_once(writer.publish(recovered));
+        let rbuf2 = poll_ready_once(reader.next(Some(rbuf)));
+        assert_eq!(read_seq(&rbuf2), 2);
+    }
+
+    #[test]
+    fn cancelled_read_keeps_its_buffer() {
+        let (mut writer, mut reader, mut wbuf) = u8_triple();
+        write_seq(&mut wbuf, 5);
+        let _next = poll_ready_once(writer.publish(wbuf));
+
+        let rbuf = poll_ready_once(reader.next(None));
+        assert_eq!(read_seq(&rbuf), 5);
+
+        // A second read parks (nothing new published), then is cancelled.
+        let mut read = reader.next(Some(rbuf));
+        let (waker, _) = thread_unpark_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(matches!(Pin::new(&mut read).poll(&mut cx), Poll::Pending));
+        drop(read);
+
+        let recovered = reader
+            .take_held_buffer()
+            .expect("cancelled read must keep its buffer");
+        assert_eq!(read_seq(&recovered), 5);
     }
 }

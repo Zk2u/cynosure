@@ -25,7 +25,7 @@
 
 use std::{
     cell::UnsafeCell,
-    collections::VecDeque,
+    collections::{BTreeMap, BTreeSet, VecDeque},
     future::Future,
     pin::Pin,
     sync::{
@@ -36,17 +36,20 @@ use std::{
 };
 
 use super::{notify::WaiterSlot, padding::CachePadded};
-use crate::{
-    hints::{likely, unlikely},
-    site_c::queue::Queue,
-};
+use crate::hints::{likely, unlikely};
 
-/// Backpressured senders, parked under the channel lock. Single-threaded access
-/// (the spinlock serializes), so cynosure's non-atomic [`Queue`] is the right
-/// container — inline for the first few waiters, spilling only under a flood.
+/// Backpressured senders, parked under the channel lock. A `BTreeMap` keyed by
+/// a monotonic id gives FIFO order (`pop_first`), O(log n) removal, and never
+/// rebuilds the whole wait-list — and its values are moved out and dropped
+/// *outside* the lock, since a `Waker` destructor is a user callback.
 struct Waiters {
-    q: Queue<(u64, Waker), 8>,
+    q: BTreeMap<u64, Arc<Waker>>,
     next_id: u64,
+    /// Senders popped from `q` and woken but not yet re-polled. Each holds an
+    /// unredeemed wake: if one is cancelled first, its wake is transferred to
+    /// the next waiter. A set, not a single slot, because several senders can
+    /// be woken before any of them re-polls.
+    selected: BTreeSet<u64>,
 }
 
 /// Spin a small pseudo-random count to desynchronize lock contenders (a cheap
@@ -100,6 +103,11 @@ struct Inner<T> {
     // producers' CAS storm.
     senders: CachePadded<AtomicUsize>, // live sender count (close detection)
     closed: AtomicBool,                // receiver dropped (shares the tail line)
+    /// Number of parked senders, mirrored from `waiters.q.len()` under the
+    /// lock. Lets the consumer's lock-free drain decide whether a slot
+    /// release needs a wake, without taking the lock per item when no
+    /// sender is parked.
+    waiters_len: CachePadded<AtomicUsize>,
 }
 
 // SAFETY: the spinlock makes every `queue`/`waiters` access exclusive; `T:
@@ -208,13 +216,25 @@ impl<T> Inner<T> {
     /// needed).
     ///
     /// Deregistering a previous parking is deliberately a *separate*
-    /// [`remove_waiter`](Self::remove_waiter) call rather than merged in here:
+    /// [`repoll_waiter`](Self::repoll_waiter) call rather than merged in here:
     /// releasing the lock between the deregister and this push lets the
     /// consumer's buffer-steal interleave, and that steal is what frees the
     /// queue for producers to proceed. Measured: merging the two into one
     /// longer critical section costs 12–19% multi-producer throughput.
     #[inline]
     fn push_or_park(&self, val: T, waker: &Waker) -> Result<(), PushParked<T>> {
+        if unlikely(self.closed.load(Ordering::Acquire)) {
+            return Err(PushParked::Closed(val));
+        }
+        // Fast path: push without cloning a waker (a `Waker::clone` is a user
+        // callback and must not run under the lock).
+        let val = match self.try_push(val) {
+            Ok(()) => return Ok(()),
+            Err(v) => v,
+        };
+        // Slow path (full): clone the waker outside the lock, then re-check and
+        // park if still full.
+        let owned = Arc::new(waker.clone());
         self.lock();
         if unlikely(self.closed.load(Ordering::Relaxed)) {
             self.unlock();
@@ -225,27 +245,73 @@ impl<T> Inner<T> {
         if likely(q.len() < self.hot.cap) {
             q.push_back(val);
             if unlikely(q.len() == 1) {
-                // empty -> non-empty: raise the gate hint (transition only).
                 self.hot.nonempty.store(1, Ordering::Release);
             }
             self.unlock();
             return Ok(());
         }
-        let w = unsafe { &mut *self.waiters.get() };
-        let id = w.next_id;
-        w.next_id = w.next_id.wrapping_add(1);
-        w.q.push_back((id, waker.clone()));
+        let (id, len, replaced) = {
+            // SAFETY: exclusive under the lock.
+            let w = unsafe { &mut *self.waiters.get() };
+            let id = w.next_id;
+            w.next_id = w.next_id.checked_add(1).expect("mpsc waiter id overflow");
+            // A duplicate id is impossible (checked add), so `insert` never
+            // replaces a live entry; capture the return anyway and drop it
+            // outside the lock.
+            let replaced = w.q.insert(id, owned);
+            (id, w.q.len(), replaced)
+        };
+        self.waiters_len.store(len, Ordering::Relaxed);
         self.unlock();
+        drop(replaced);
         Err(PushParked::Full(val, id))
     }
 
-    /// Deregister a parked sender (cancellation or before re-parking).
-    fn remove_waiter(&self, id: u64) {
+    /// Deregister a parked sender *before re-polling*. Clears `selected` if
+    /// this was the woken sender but does **not** transfer the wake: the
+    /// re-poll is about to claim the capacity it was woken for. Waker
+    /// destruction happens after the lock is released.
+    fn repoll_waiter(&self, id: u64) {
         self.lock();
         // SAFETY: exclusive under the lock.
-        let w = unsafe { &mut *self.waiters.get() };
-        w.q.retain(|(i, _)| *i != id);
+        let (removed, len) = {
+            let w = unsafe { &mut *self.waiters.get() };
+            let removed = w.q.remove(&id);
+            w.selected.remove(&id); // the wake (if any) is redeemed by this re-poll
+            (removed, w.q.len())
+        };
+        self.waiters_len.store(len, Ordering::Relaxed);
         self.unlock();
+        drop(removed);
+    }
+
+    /// Cancel a parked or selected sender. If it was the *selected* sender
+    /// (popped and woken, but not yet re-polled), transfer the wake to the
+    /// next waiter so a freed capacity slot is not abandoned. All `Waker`
+    /// destruction and waking happens outside the lock.
+    fn cancel_waiter(&self, id: u64) {
+        let (removed, next) = {
+            self.lock();
+            // SAFETY: exclusive under the lock.
+            let w = unsafe { &mut *self.waiters.get() };
+            let removed = w.q.remove(&id);
+            let next = if w.selected.remove(&id) {
+                // This sender held an unredeemed wake: pass it to the next waiter.
+                w.q.pop_first().map(|(nid, wk)| {
+                    w.selected.insert(nid);
+                    wk
+                })
+            } else {
+                None
+            };
+            self.waiters_len.store(w.q.len(), Ordering::Relaxed);
+            self.unlock();
+            (removed, next)
+        };
+        drop(removed);
+        if let Some(wk) = next {
+            wk.wake_by_ref();
+        }
     }
 
     /// **Buffer-steal** (single-consumer only): swap the *entire* shared queue
@@ -267,11 +333,19 @@ impl<T> Inner<T> {
         }
         std::mem::swap(q, staging); // staging <- all items, q <- empty
         self.hot.nonempty.store(0, Ordering::Release); // stole everything: queue is empty
-        let w = unsafe { &mut *self.waiters.get() };
-        let waker = w.q.pop_front().map(|(_, wk)| wk);
+        let waker = {
+            // SAFETY: exclusive under the lock.
+            let w = unsafe { &mut *self.waiters.get() };
+            let popped = w.q.pop_first().map(|(id, wk)| {
+                w.selected.insert(id);
+                wk
+            });
+            self.waiters_len.store(w.q.len(), Ordering::Relaxed);
+            popped
+        };
         self.unlock();
         if let Some(wk) = waker {
-            wk.wake(); // wake outside the lock
+            wk.wake_by_ref(); // wake outside the lock
         }
         n
     }
@@ -280,12 +354,19 @@ impl<T> Inner<T> {
     /// empty queue, so any leftover waiter has room to push now).
     fn wake_one_waiter(&self) {
         self.lock();
-        // SAFETY: exclusive under the lock.
-        let w = unsafe { &mut *self.waiters.get() };
-        let waker = w.q.pop_front().map(|(_, wk)| wk);
+        let waker = {
+            // SAFETY: exclusive under the lock.
+            let w = unsafe { &mut *self.waiters.get() };
+            let popped = w.q.pop_first().map(|(id, wk)| {
+                w.selected.insert(id);
+                wk
+            });
+            self.waiters_len.store(w.q.len(), Ordering::Relaxed);
+            popped
+        };
         self.unlock();
         if let Some(wk) = waker {
-            wk.wake();
+            wk.wake_by_ref();
         }
     }
 
@@ -296,12 +377,14 @@ impl<T> Inner<T> {
         // SAFETY: exclusive under the lock.
         let w = unsafe { &mut *self.waiters.get() };
         let mut wakers = Vec::new();
-        while let Some((_, wk)) = w.q.pop_front() {
+        while let Some((_, wk)) = w.q.pop_first() {
             wakers.push(wk);
         }
+        w.selected.clear();
+        self.waiters_len.store(0, Ordering::Relaxed);
         self.unlock();
         for wk in wakers {
-            wk.wake();
+            wk.wake_by_ref();
         }
     }
 }
@@ -324,12 +407,14 @@ pub fn bounded<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
             queue: UnsafeCell::new(VecDeque::with_capacity(cap)),
         }),
         waiters: UnsafeCell::new(Waiters {
-            q: Queue::new(),
+            q: BTreeMap::new(),
             next_id: 0,
+            selected: BTreeSet::new(),
         }),
         recv: CachePadded::new(WaiterSlot::new()),
         senders: CachePadded::new(AtomicUsize::new(1)),
         closed: AtomicBool::new(false),
+        waiters_len: CachePadded::new(AtomicUsize::new(0)),
     });
     (
         Sender {
@@ -466,7 +551,7 @@ impl<'a, T> Future for Send_<'a, T> {
         // no-op; spurious re-poll: avoids a duplicate). Kept separate from the push
         // below so the consumer's steal can interleave between the two locks.
         if let Some(id) = this.parked_id.take() {
-            this.inner.remove_waiter(id);
+            this.inner.repoll_waiter(id);
         }
         // Push if there's room, else park in the wait-list. The lock serializes
         // against the consumer's drain, so the wakeup can't be lost.
@@ -487,9 +572,10 @@ impl<'a, T> Future for Send_<'a, T> {
 
 impl<'a, T> Drop for Send_<'a, T> {
     fn drop(&mut self) {
-        // Cancelled while parked: remove our waker so it can't absorb a wake.
+        // Cancelled while parked: remove our waker so it can't absorb a wake. If
+        // we were the selected (woken) sender, pass the wake to the next waiter.
         if let Some(id) = self.parked_id.take() {
-            self.inner.remove_waiter(id);
+            self.inner.cancel_waiter(id);
         }
     }
 }
@@ -513,6 +599,12 @@ impl<T> Receiver<T> {
     #[inline]
     fn next_staged(&mut self) -> Option<T> {
         if let Some(v) = self.staging.pop_front() {
+            // Delivering a staged item to the caller keeps the producer/consumer
+            // pacing one wake per item; guarded by the lock-free length check so
+            // the common no-waiter case stays lock-free.
+            if self.inner.waiters_len.load(Ordering::Relaxed) > 0 {
+                self.inner.wake_one_waiter();
+            }
             return Some(v); // common: served from local staging, no lock
         }
         if self.inner.steal_into(&mut self.staging) > 0 {
@@ -663,8 +755,11 @@ impl<'a, T> Future for Recv<'a, T> {
             return Poll::Ready(rx.next_staged());
         }
         // About to sleep empty: ensure one parked producer is woken so it refills
-        // and signals us (liveness; flag-gated, free when none parked).
-        rx.inner.wake_one_waiter();
+        // and signals us (liveness). Guarded by the lock-free length check, so
+        // the common no-waiter case does not take the spinlock.
+        if rx.inner.waiters_len.load(Ordering::Relaxed) > 0 {
+            rx.inner.wake_one_waiter();
+        }
         Poll::Pending
     }
 }
@@ -809,5 +904,63 @@ mod tests {
         }
         assert_eq!(count, NP * PER);
         assert_eq!(sum.load(Ordering::Relaxed), NP * (PER * (PER - 1) / 2));
+    }
+
+    /// Cancelling a sender that was woken but not yet re-polled must pass its
+    /// wake to the next parked sender — including when several senders were
+    /// woken before any re-polled (which a single `selected` slot would lose).
+    #[test]
+    fn cancelling_one_of_several_woken_senders_passes_the_wake_on() {
+        use std::{
+            sync::{
+                Arc,
+                atomic::{AtomicBool, Ordering as O},
+            },
+            task::{Context, Wake, Waker},
+        };
+
+        struct Flag(Arc<AtomicBool>);
+        impl Wake for Flag {
+            fn wake(self: Arc<Self>) {
+                self.0.store(true, O::SeqCst);
+            }
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.0.store(true, O::SeqCst);
+            }
+        }
+        fn flag_waker() -> (Waker, Arc<AtomicBool>) {
+            let f = Arc::new(AtomicBool::new(false));
+            (Arc::new(Flag(f.clone())).into(), f)
+        }
+
+        let (tx, mut rx) = bounded::<u32>(2);
+        tx.try_send(1).unwrap();
+        tx.try_send(2).unwrap();
+
+        // Three senders park against the full channel, each with its own waker.
+        let mut sends = Vec::new();
+        let mut flags = Vec::new();
+        for _ in 0..3 {
+            let (w, f) = flag_waker();
+            let mut cx = Context::from_waker(&w);
+            let mut fut = Box::pin(tx.send(99));
+            assert!(fut.as_mut().poll(&mut cx).is_pending());
+            sends.push(fut);
+            flags.push(f);
+        }
+
+        // Deliver both items: the steal wakes sender 0, then the staged pop
+        // wakes sender 1 — two wake credits outstanding at once.
+        assert_eq!(rx.try_recv(), Ok(1));
+        assert_eq!(rx.try_recv(), Ok(2));
+        assert!(flags[0].load(O::SeqCst), "first sender woken by the steal");
+        assert!(flags[1].load(O::SeqCst), "second sender woken by the pop");
+
+        // Cancel sender 0 before it re-polls: its wake must move to sender 2.
+        drop(sends.remove(0));
+        assert!(
+            flags[2].load(O::SeqCst),
+            "cancelling a woken sender must hand its wake to the next parked sender"
+        );
     }
 }
