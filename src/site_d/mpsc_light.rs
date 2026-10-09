@@ -14,9 +14,10 @@
 //! between drains, so it pays the lock once per batch, not per item.
 //!
 //! Backpressured senders park in a **wait-list held under the same lock** (a
-//! single-threaded [`Queue`], since the spinlock serializes access) — so a
-//! sender parks and a freed slot wakes it in *one* lock acquisition, with no
-//! separate mutex and no cross-thread handshake (the lock orders it). The
+//! `BTreeMap` keyed by a monotonic id, since the spinlock serializes access and
+//! removal must be O(log n)) — so a sender parks and a freed slot wakes it in
+//! *one* lock acquisition, with no separate mutex and no cross-thread handshake
+//! (the lock orders it). The
 //! consumer parks on a flag-gated `WaiterSlot`. `recv()` is **polite by
 //! default** — it parks promptly, costing a shared reactor's co-located tasks
 //! nothing while idle; `recv_hot()` opts into a short pre-park spin window for

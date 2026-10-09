@@ -24,7 +24,7 @@ use std::{
 use super::queue::Queue;
 use crate::hints::likely;
 
-/// A counting semaphore. Not `Clone`; wrap in [`Rc`](std::rc::Rc) to share.
+/// A counting semaphore. Not `Clone`; wrap in [`Rc`] to share.
 pub struct LocalSemaphore {
     permits: Cell<usize>,
     // `(token, n_requested, waker)`. `token` identifies a future's own entry for

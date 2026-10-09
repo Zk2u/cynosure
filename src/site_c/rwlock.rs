@@ -25,7 +25,7 @@ use crate::hints::likely;
 /// # Sharing
 ///
 /// `LocalRwLock` is not `Clone`. If you need to share it between multiple
-/// parts of your code, wrap it in [`Rc`](std::rc::Rc):
+/// parts of your code, wrap it in [`Rc`]:
 ///
 /// ```rust,no_run
 /// use std::rc::Rc;
